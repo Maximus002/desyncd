@@ -65,11 +65,13 @@ pub async fn find_best_strategy(
     debug!(%domain, "baseline failed, searching for bypass strategy");
 
     // Step 2: Single technique sweep.
+    // Note: fake_packet is excluded — in SOCKS mode, fake data is sent
+    // on the same TCP stream and reaches the server, breaking TLS.
+    // It only works in NFQ mode where packets can have TTL=1.
     let techniques = [
         ("tcp_split", SplitPosition::Sni),
         ("tls_record_frag", SplitPosition::Sni),
         ("disorder", SplitPosition::Sni),
-        ("fake_packet", SplitPosition::Sni),
         ("sni_manip", SplitPosition::Sni),
     ];
 

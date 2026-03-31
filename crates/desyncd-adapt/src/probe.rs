@@ -119,15 +119,21 @@ async fn probe_inner(
     stream.flush().await?;
 
     // Wait for a response (ServerHello or RST/FIN).
-    let mut buf = [0u8; 5]; // TLS record header: type + version + length.
+    let mut buf = [0u8; 6]; // TLS record header (5) + handshake type (1).
     match tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf)).await {
         Ok(Ok(_)) => {
-            // Check if it looks like a TLS record.
-            let is_tls = buf[0] == 0x16 // Handshake
-                || buf[0] == 0x15 // Alert (still means DPI didn't block)
-                || buf[0] == 0x14; // ChangeCipherSpec
-            trace!(first_byte = buf[0], is_tls, "got response");
-            Ok(is_tls)
+            // A real ServerHello: content_type=0x16 (Handshake), then
+            // after the 5-byte record header, handshake_type=0x02 (ServerHello).
+            let is_server_hello = buf[0] == 0x16 && buf[5] == 0x02;
+            // TLS Alert (0x15) means data reached the server but
+            // it rejected our handshake — technique is NOT usable.
+            trace!(
+                content_type = buf[0],
+                handshake_type = buf[5],
+                is_server_hello,
+                "got response"
+            );
+            Ok(is_server_hello)
         }
         Ok(Err(e)) => {
             // Connection reset or other error — likely blocked.
@@ -140,20 +146,104 @@ async fn probe_inner(
     }
 }
 
-/// Build a minimal TLS 1.2 ClientHello with the given SNI.
+/// Build a realistic TLS 1.2/1.3 ClientHello with the given SNI.
+///
+/// Includes all extensions required by modern servers:
+/// SNI, supported_groups, signature_algorithms, ec_point_formats,
+/// and supported_versions.
 fn build_probe_client_hello(domain: &str) -> Vec<u8> {
     let sni_bytes = domain.as_bytes();
 
-    // SNI extension.
-    let sni_ext_data_len = 2 + 1 + 2 + sni_bytes.len();
-    let sni_ext_len = 4 + sni_ext_data_len;
+    // We'll build extensions into a temporary buffer first, then compute lengths.
+    let mut extensions = Vec::with_capacity(256);
 
-    // Supported versions extension (TLS 1.3 + 1.2).
-    let sv_ext_len = 4 + 1 + 4; // type(2) + len(2) + list_len(1) + 2 versions
+    // 1. SNI extension (0x0000).
+    {
+        let sni_list_len = 1 + 2 + sni_bytes.len(); // type(1) + len(2) + name
+        let ext_data_len = 2 + sni_list_len;         // list_len(2) + list
+        extensions.extend_from_slice(&0x0000u16.to_be_bytes());
+        extensions.extend_from_slice(&(ext_data_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&(sni_list_len as u16).to_be_bytes());
+        extensions.push(0x00); // host_name type
+        extensions.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(sni_bytes);
+    }
 
-    let extensions_len = sni_ext_len + sv_ext_len;
+    // 2. EC point formats (0x000b).
+    {
+        extensions.extend_from_slice(&0x000bu16.to_be_bytes());
+        extensions.extend_from_slice(&2u16.to_be_bytes()); // ext data len
+        extensions.push(1); // formats length
+        extensions.push(0); // uncompressed
+    }
 
-    // Cipher suites: common ones.
+    // 3. Supported groups (0x000a) — required for ECDHE ciphers.
+    {
+        let groups: &[u16] = &[
+            0x001d, // x25519
+            0x0017, // secp256r1
+            0x0018, // secp384r1
+            0x0019, // secp521r1
+        ];
+        let list_len = (groups.len() * 2) as u16;
+        extensions.extend_from_slice(&0x000au16.to_be_bytes());
+        extensions.extend_from_slice(&(list_len + 2).to_be_bytes()); // ext data len
+        extensions.extend_from_slice(&list_len.to_be_bytes());
+        for g in groups {
+            extensions.extend_from_slice(&g.to_be_bytes());
+        }
+    }
+
+    // 4. Signature algorithms (0x000d) — required for certificate verification.
+    {
+        let sig_algs: &[u16] = &[
+            0x0403, // ecdsa_secp256r1_sha256
+            0x0503, // ecdsa_secp384r1_sha384
+            0x0804, // rsa_pss_rsae_sha256
+            0x0805, // rsa_pss_rsae_sha384
+            0x0806, // rsa_pss_rsae_sha512
+            0x0401, // rsa_pkcs1_sha256
+            0x0501, // rsa_pkcs1_sha384
+            0x0601, // rsa_pkcs1_sha512
+        ];
+        let list_len = (sig_algs.len() * 2) as u16;
+        extensions.extend_from_slice(&0x000du16.to_be_bytes());
+        extensions.extend_from_slice(&(list_len + 2).to_be_bytes());
+        extensions.extend_from_slice(&list_len.to_be_bytes());
+        for sa in sig_algs {
+            extensions.extend_from_slice(&sa.to_be_bytes());
+        }
+    }
+
+    // 5. Supported versions (0x002b) — TLS 1.3 + 1.2.
+    {
+        extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+        extensions.extend_from_slice(&5u16.to_be_bytes());
+        extensions.push(4); // list length in bytes
+        extensions.extend_from_slice(&0x0304u16.to_be_bytes()); // TLS 1.3
+        extensions.extend_from_slice(&0x0303u16.to_be_bytes()); // TLS 1.2
+    }
+
+    // 6. Key share (0x0033) — x25519 with dummy public key (probe only).
+    {
+        let mut x25519_key = [0u8; 32];
+        for b in &mut x25519_key {
+            *b = fastrand::u8(..);
+        }
+        // key_share entry: group(2) + key_len(2) + key(32) = 36
+        let entry_len = 2 + 2 + 32;
+        let ext_data_len = 2 + entry_len; // client_shares_len(2) + entry
+        extensions.extend_from_slice(&0x0033u16.to_be_bytes());
+        extensions.extend_from_slice(&(ext_data_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&(entry_len as u16).to_be_bytes());
+        extensions.extend_from_slice(&0x001du16.to_be_bytes()); // x25519
+        extensions.extend_from_slice(&32u16.to_be_bytes());
+        extensions.extend_from_slice(&x25519_key);
+    }
+
+    let extensions_len = extensions.len();
+
+    // Cipher suites.
     let cipher_suites: &[u16] = &[
         0x1301, // TLS_AES_128_GCM_SHA256
         0x1302, // TLS_AES_256_GCM_SHA384
@@ -165,8 +255,20 @@ fn build_probe_client_hello(domain: &str) -> Vec<u8> {
     ];
     let cipher_suites_len = cipher_suites.len() * 2;
 
-    let ch_body_len = 2 + 32 + 1 + 2 + cipher_suites_len + 1 + 1 + 2 + extensions_len;
-    let hs_len = 4 + ch_body_len;
+    // Session ID (32 random bytes for TLS 1.3 middlebox compat).
+    let mut session_id = [0u8; 32];
+    for b in &mut session_id {
+        *b = fastrand::u8(..);
+    }
+
+    let ch_body_len = 2      // client_version
+        + 32                  // random
+        + 1 + 32              // session_id_len + session_id
+        + 2 + cipher_suites_len // cipher_suites
+        + 1 + 1               // compression
+        + 2 + extensions_len; // extensions
+
+    let hs_len = 4 + ch_body_len; // handshake header + body
 
     let mut buf = Vec::with_capacity(5 + hs_len);
 
@@ -188,7 +290,9 @@ fn build_probe_client_hello(domain: &str) -> Vec<u8> {
         buf.push(fastrand::u8(..));
     }
 
-    buf.push(0); // session_id_len = 0
+    // Session ID (32 bytes for middlebox compatibility).
+    buf.push(32);
+    buf.extend_from_slice(&session_id);
 
     // Cipher suites.
     buf.extend_from_slice(&(cipher_suites_len as u16).to_be_bytes());
@@ -201,22 +305,7 @@ fn build_probe_client_hello(domain: &str) -> Vec<u8> {
 
     // Extensions.
     buf.extend_from_slice(&(extensions_len as u16).to_be_bytes());
-
-    // SNI extension (type 0x0000).
-    buf.extend_from_slice(&0u16.to_be_bytes());
-    buf.extend_from_slice(&(sni_ext_data_len as u16).to_be_bytes());
-    let sni_list_len = 1 + 2 + sni_bytes.len();
-    buf.extend_from_slice(&(sni_list_len as u16).to_be_bytes());
-    buf.push(0x00); // host_name type
-    buf.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
-    buf.extend_from_slice(sni_bytes);
-
-    // Supported versions extension (type 0x002b).
-    buf.extend_from_slice(&0x002bu16.to_be_bytes());
-    buf.extend_from_slice(&5u16.to_be_bytes()); // ext data len
-    buf.push(4); // list length
-    buf.extend_from_slice(&0x0304u16.to_be_bytes()); // TLS 1.3
-    buf.extend_from_slice(&0x0303u16.to_be_bytes()); // TLS 1.2
+    buf.extend_from_slice(&extensions);
 
     buf
 }
