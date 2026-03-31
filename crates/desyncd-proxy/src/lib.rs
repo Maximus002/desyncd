@@ -13,11 +13,12 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
 
-/// Run the proxy server with auto-detection of SOCKS5 vs HTTP CONNECT.
+/// Run the proxy server with auto-detection of protocol.
 ///
-/// Peeks at the first byte to determine the protocol:
+/// Peeks at the first bytes to determine the protocol:
 /// - `0x05` → SOCKS5
-/// - `C` (0x43) → HTTP CONNECT
+/// - `0x04` → SOCKS4/4a
+/// - ASCII letter → HTTP proxy (CONNECT, GET, POST, etc.)
 pub async fn run_socks_proxy(
     listen_addr: SocketAddr,
     selector: Arc<Selector>,
@@ -25,7 +26,7 @@ pub async fn run_socks_proxy(
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     let stealth = Arc::new(stealth);
-    info!(%listen_addr, "proxy listening (SOCKS5 + HTTP CONNECT auto-detect)");
+    info!(%listen_addr, "proxy listening (SOCKS5 + SOCKS4 + HTTP proxy auto-detect)");
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
@@ -57,17 +58,23 @@ async fn handle_connection(
             debug!(%peer_addr, "detected SOCKS5 protocol");
             socks5::handle_client(stream, peer_addr, selector, stealth).await
         }
-        b'C' => {
-            // Likely HTTP CONNECT.
-            debug!(%peer_addr, "detected HTTP CONNECT protocol");
-            // Read the first line for HTTP CONNECT handler.
-            let mut first_buf = vec![0u8; 4096];
+        0x04 => {
+            // SOCKS4/4a.
+            debug!(%peer_addr, "detected SOCKS4 protocol");
+            socks5::handle_socks4(stream, peer_addr, selector, stealth).await
+        }
+        // Any ASCII letter → HTTP proxy request.
+        // CONNECT (0x43), GET (0x47), POST (0x50), PUT (0x50),
+        // HEAD (0x48), DELETE (0x44), OPTIONS (0x4F), PATCH (0x50)
+        b if b.is_ascii_alphabetic() => {
+            debug!(%peer_addr, first_byte = b, "detected HTTP proxy protocol");
+            let mut first_buf = vec![0u8; 8192];
             let n = stream.read(&mut first_buf).await?;
             first_buf.truncate(n);
-            http_connect::handle_connect(stream, peer_addr, &first_buf, selector, stealth).await
+            http_connect::handle_http_proxy(stream, peer_addr, &first_buf, selector, stealth).await
         }
         other => {
-            debug!(%peer_addr, first_byte = other, "unknown protocol, trying SOCKS5");
+            debug!(%peer_addr, first_byte = other, "unknown protocol byte, trying SOCKS5");
             socks5::handle_client(stream, peer_addr, selector, stealth).await
         }
     }

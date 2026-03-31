@@ -1,8 +1,8 @@
-//! SOCKS5 protocol implementation.
+//! SOCKS4/4a and SOCKS5 protocol implementation.
 //!
-//! Implements the SOCKS5 handshake (RFC 1928) for the CONNECT command.
-//! After the handshake, the connection is passed to the relay module
-//! which applies DPI bypass techniques on the first outbound data.
+//! Implements the SOCKS5 handshake (RFC 1928) and SOCKS4/4a for the
+//! CONNECT command. After the handshake, the connection is passed to
+//! the relay module which applies DPI bypass techniques.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -155,5 +155,111 @@ async fn send_reply(client: &mut TcpStream, reply: u8, atyp: u8) -> anyhow::Resu
     }
 
     client.write_all(&response).await?;
+    Ok(())
+}
+
+/// Handle a SOCKS4/4a client connection.
+///
+/// SOCKS4 format:
+///   VER(1) CMD(1) DSTPORT(2) DSTIP(4) USERID(variable, null-terminated)
+///
+/// SOCKS4a extension: if DSTIP is 0.0.0.x (x != 0), a domain name follows
+/// the null-terminated userid.
+pub async fn handle_socks4(
+    mut client: TcpStream,
+    peer_addr: SocketAddr,
+    selector: &Selector,
+    stealth: Option<&StealthConfig>,
+) -> anyhow::Result<()> {
+    debug!(%peer_addr, "new SOCKS4 connection");
+
+    // Read version byte (already peeked as 0x04).
+    let version = client.read_u8().await?;
+    if version != 0x04 {
+        anyhow::bail!("expected SOCKS4, got version: {}", version);
+    }
+
+    let cmd = client.read_u8().await?;
+    if cmd != 0x01 {
+        // Only CONNECT (0x01) is supported, not BIND (0x02).
+        let reply = [0x00, 0x5B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // rejected
+        client.write_all(&reply).await?;
+        anyhow::bail!("SOCKS4 unsupported command: {}", cmd);
+    }
+
+    let port = client.read_u16().await?;
+
+    let mut ip_bytes = [0u8; 4];
+    client.read_exact(&mut ip_bytes).await?;
+
+    // Read userid (null-terminated).
+    let mut userid = Vec::new();
+    loop {
+        let b = client.read_u8().await?;
+        if b == 0x00 {
+            break;
+        }
+        userid.push(b);
+        if userid.len() > 255 {
+            anyhow::bail!("SOCKS4 userid too long");
+        }
+    }
+
+    // SOCKS4a: if IP is 0.0.0.x (x != 0), read domain after userid.
+    let is_socks4a = ip_bytes[0] == 0 && ip_bytes[1] == 0 && ip_bytes[2] == 0 && ip_bytes[3] != 0;
+
+    let (target_addr, domain) = if is_socks4a {
+        // Read domain name (null-terminated).
+        let mut domain_bytes = Vec::new();
+        loop {
+            let b = client.read_u8().await?;
+            if b == 0x00 {
+                break;
+            }
+            domain_bytes.push(b);
+            if domain_bytes.len() > 255 {
+                anyhow::bail!("SOCKS4a domain too long");
+            }
+        }
+        let domain = String::from_utf8(domain_bytes)?;
+        let addr_str = format!("{}:{}", domain, port);
+        let addr = lookup_host(&addr_str)
+            .await?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))?;
+        (addr, Some(domain))
+    } else {
+        let ip = Ipv4Addr::from(ip_bytes);
+        let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
+        (addr, None)
+    };
+
+    info!(
+        %peer_addr,
+        target = %target_addr,
+        domain = ?domain,
+        "SOCKS4 CONNECT"
+    );
+
+    // Connect to target.
+    let upstream = match TcpStream::connect(target_addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(%target_addr, error = %e, "SOCKS4 failed to connect");
+            // SOCKS4 rejected reply.
+            let reply = [0x00, 0x5B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            client.write_all(&reply).await?;
+            return Err(e.into());
+        }
+    };
+
+    // SOCKS4 success reply: VN=0x00 CD=0x5A DSTPORT(2) DSTIP(4).
+    let mut reply = vec![0x00, 0x5A];
+    reply.extend_from_slice(&port.to_be_bytes());
+    reply.extend_from_slice(&ip_bytes);
+    client.write_all(&reply).await?;
+
+    // Relay with desync.
+    relay::relay_with_desync(client, upstream, domain.as_deref(), selector, stealth).await?;
     Ok(())
 }
