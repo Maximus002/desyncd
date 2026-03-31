@@ -230,6 +230,9 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
 
     let engine = desyncd_adapt::AdaptEngine::new(store, adapt_config);
 
+    // Collect discovered strategies for config generation.
+    let mut discovered: Vec<(String, desyncd_strategy::Strategy)> = Vec::new();
+
     for domain in &domains {
         println!("\n=== Adapting: {} ===\n", domain);
 
@@ -279,10 +282,148 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
                 )?;
                 println!("  Saved to database.");
             }
+
+            discovered.push((domain.clone(), strategy.clone()));
         } else {
             println!("\nNo working strategy found (domain may not be blocked).");
         }
     }
+
+    // Generate config file if any strategies were discovered.
+    if save && !discovered.is_empty() {
+        let config_path = resolve_config_path();
+        generate_config(&config, &discovered, &config_path)?;
+        println!("\n========================================");
+        println!("Config written to: {}", config_path.display());
+        println!("Run with:  desyncd run");
+        println!("========================================");
+    }
+
+    Ok(())
+}
+
+/// Find the config file path: CLI --config, existing default location, or create new.
+fn resolve_config_path() -> PathBuf {
+    // Check XDG/platform config dir.
+    let config_dir = if cfg!(target_os = "macos") {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join(".config/desyncd"))
+    } else if cfg!(target_os = "linux") {
+        std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".config"))
+            })
+            .map(|p| p.join("desyncd"))
+    } else if cfg!(target_os = "windows") {
+        std::env::var("APPDATA")
+            .ok()
+            .map(|a| PathBuf::from(a).join("desyncd"))
+    } else {
+        None
+    };
+
+    config_dir
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("config.toml")
+}
+
+/// Generate a TOML config file from discovered strategies.
+fn generate_config(
+    base_config: &AppConfig,
+    discovered: &[(String, desyncd_strategy::Strategy)],
+    output_path: &PathBuf,
+) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    // Build ConfigFile from current config + discovered strategies.
+    let mut strategies = HashMap::new();
+    let mut rules = Vec::new();
+    let mut priority = 10i32;
+
+    for (domain, strategy) in discovered {
+        // Create a clean strategy name from the domain.
+        let strategy_name = domain
+            .replace('.', "_")
+            .replace('*', "wildcard");
+
+        strategies.insert(
+            strategy_name.clone(),
+            desyncd_config::StrategyDef {
+                techniques: strategy.techniques.clone(),
+            },
+        );
+
+        // Build domain patterns: exact domain + wildcard subdomains.
+        let domain_patterns = vec![
+            domain.clone(),
+            format!("*.{}", domain),
+        ];
+
+        rules.push(desyncd_strategy::MatchRule {
+            domains: domain_patterns,
+            strategy: strategy_name,
+            priority,
+        });
+
+        priority += 1;
+    }
+
+    // Add a passthrough catch-all rule.
+    strategies.insert(
+        "passthrough".into(),
+        desyncd_config::StrategyDef {
+            techniques: vec![],
+        },
+    );
+    rules.push(desyncd_strategy::MatchRule {
+        domains: vec!["*".into()],
+        strategy: "passthrough".into(),
+        priority: 0,
+    });
+
+    let config_file = desyncd_config::ConfigFile {
+        general: desyncd_config::GeneralConfig {
+            mode: base_config.mode,
+            log_level: base_config.log_level.clone(),
+        },
+        proxy: desyncd_config::ProxyConfig {
+            listen: base_config.listen,
+            socks5: true,
+        },
+        adaptation: desyncd_config::AdaptationConfig {
+            enabled: true,
+            test_interval_secs: base_config.adaptation.test_interval_secs,
+            test_domains: discovered.iter().map(|(d, _)| d.clone()).collect(),
+            db_path: base_config.db_path.clone(),
+        },
+        stealth: base_config.stealth.clone(),
+        strategies,
+        rules,
+    };
+
+    let toml_str = toml::to_string_pretty(&config_file)
+        .context("failed to serialize config")?;
+
+    // Ensure parent directory exists.
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .context("failed to create config directory")?;
+    }
+
+    let mut file = std::fs::File::create(output_path)
+        .context("failed to create config file")?;
+
+    writeln!(file, "# desyncd configuration")?;
+    writeln!(file, "# Auto-generated by: desyncd adapt --save")?;
+    writeln!(file, "# Edit strategies and rules as needed.")?;
+    writeln!(file)?;
+    file.write_all(toml_str.as_bytes())?;
 
     Ok(())
 }
