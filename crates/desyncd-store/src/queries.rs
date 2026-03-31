@@ -178,6 +178,44 @@ impl Store {
         })
     }
 
+    /// Get the highest-scoring strategy across ALL domains.
+    ///
+    /// Used for smart prediction: if tls_record_frag worked for facebook.com,
+    /// it will likely work for instagram.com on the same ISP/DPI.
+    pub fn get_any_best_strategy(&self) -> anyhow::Result<Option<StrategyRecord>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT s.id, s.name, s.techniques_json
+                 FROM domain_strategies ds
+                 JOIN strategies s ON s.id = ds.strategy_id
+                 ORDER BY ds.score DESC
+                 LIMIT 1",
+            )?;
+
+            let result = stmt
+                .query_row([], |row| {
+                    let id: i64 = row.get(0)?;
+                    let name: String = row.get(1)?;
+                    let json: String = row.get(2)?;
+                    Ok((id, name, json))
+                })
+                .optional()?;
+
+            match result {
+                Some((id, name, json)) => {
+                    let techniques: Vec<TechniqueConfig> =
+                        serde_json::from_str(&json).context("invalid techniques JSON")?;
+                    Ok(Some(StrategyRecord {
+                        id,
+                        name,
+                        techniques,
+                    }))
+                }
+                None => Ok(None),
+            }
+        })
+    }
+
     /// Update or create a domain→strategy mapping with a score.
     pub fn update_domain_strategy(
         &self,

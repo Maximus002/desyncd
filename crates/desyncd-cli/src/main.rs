@@ -37,8 +37,47 @@ async fn main() -> anyhow::Result<()> {
         } => test_domains(config, domain, all_techniques).await,
         Command::Adapt {
             domain,
+            domains_file,
+            preset,
             save,
-        } => adapt_domains(config, domain, save).await,
+        } => {
+            let mut all_domains = domain;
+
+            // Load domains from file.
+            if let Some(file_path) = domains_file {
+                let path = expand_tilde(&file_path);
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read domains file: {}", path.display()))?;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        all_domains.push(trimmed.to_string());
+                    }
+                }
+            }
+
+            // Load preset domains.
+            if let Some(preset_name) = preset {
+                let preset_domains = get_preset_domains(&preset_name)?;
+                all_domains.extend(preset_domains);
+            }
+
+            // Deduplicate.
+            all_domains.sort();
+            all_domains.dedup();
+
+            if all_domains.is_empty() {
+                anyhow::bail!(
+                    "no domains specified. Use --domain, --domains-file, or --preset.\n\
+                     Examples:\n  \
+                       desyncd adapt --domain facebook.com --save\n  \
+                       desyncd adapt --domains-file blocked.txt --save\n  \
+                       desyncd adapt --preset russia --save"
+                );
+            }
+
+            adapt_domains(config, all_domains, save).await
+        }
         Command::ShowConfig => {
             show_config(&config);
             Ok(())
@@ -47,9 +86,37 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run(config: AppConfig) -> anyhow::Result<()> {
+    // If no strategies are configured, apply tls_record_frag as a safe
+    // default. This gives instant DPI bypass on cold start while background
+    // adaptation optimizes. tls_record_frag creates valid TLS records
+    // (RFC 5246) so it's harmless for non-blocked sites.
+    let (strategies, rules) = if config.strategies.is_empty() {
+        info!("no strategies configured, using tls_record_frag as safe default");
+        let default_strategy = desyncd_strategy::Strategy {
+            name: "auto_default".into(),
+            techniques: vec![desyncd_desync::technique::TechniqueConfig {
+                name: "tls_record_frag".into(),
+                split_position: Some(desyncd_types::SplitPosition::SniOffset(-1)),
+                enabled: true,
+                fake_type: None,
+                sni_mode: None,
+                host_mode: None,
+                stealth: None,
+            }],
+        };
+        let default_rule = desyncd_strategy::MatchRule {
+            domains: vec!["*".into()],
+            strategy: "auto_default".into(),
+            priority: 0,
+        };
+        (vec![default_strategy], vec![default_rule])
+    } else {
+        (config.strategies.clone(), config.rules.clone())
+    };
+
     let selector = Arc::new(Selector::new(
-        config.strategies.clone(),
-        config.rules.clone(),
+        strategies,
+        rules,
         config.default_strategy.clone(),
     ));
 
@@ -259,9 +326,14 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
         }
 
         if let Some(ref strategy) = result.best_strategy {
+            let guess_tag = if result.was_fast_guess {
+                " [FAST GUESS]"
+            } else {
+                ""
+            };
             println!(
-                "\nBest strategy: {} (score: {:.1})",
-                strategy.name, result.best_score
+                "\nBest strategy: {} (score: {:.1}){}",
+                strategy.name, result.best_score, guess_tag
             );
             for tech in &strategy.techniques {
                 println!(
@@ -482,6 +554,49 @@ fn show_config(config: &AppConfig) {
             r.domains, r.strategy, r.priority
         );
     }
+}
+
+/// Get domains for a built-in preset.
+///
+/// These are commonly blocked domains by region. The list is intentionally
+/// small — we test a few representative domains and apply the strategy
+/// globally (same DPI usually blocks them all the same way).
+fn get_preset_domains(preset: &str) -> anyhow::Result<Vec<String>> {
+    let domains = match preset.to_lowercase().as_str() {
+        "russia" | "ru" => vec![
+            "facebook.com",
+            "instagram.com",
+            "twitter.com",
+            "youtube.com",
+            "linkedin.com",
+            "medium.com",
+            "meduza.io",
+        ],
+        "china" | "cn" => vec![
+            "google.com",
+            "youtube.com",
+            "facebook.com",
+            "twitter.com",
+            "wikipedia.org",
+            "instagram.com",
+        ],
+        "iran" | "ir" => vec![
+            "youtube.com",
+            "facebook.com",
+            "twitter.com",
+            "telegram.org",
+            "instagram.com",
+        ],
+        "test" => vec![
+            "facebook.com",
+            "youtube.com",
+        ],
+        _ => anyhow::bail!(
+            "unknown preset: '{}'. Available: russia, china, iran, test",
+            preset
+        ),
+    };
+    Ok(domains.into_iter().map(String::from).collect())
 }
 
 /// Expand `~` in a path to the user's home directory.

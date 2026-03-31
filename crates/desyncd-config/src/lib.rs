@@ -61,7 +61,13 @@ pub enum Command {
         /// Domains to find strategies for.
         #[arg(short, long)]
         domain: Vec<String>,
-        /// Save discovered strategies to database.
+        /// Read domains from a file (one per line).
+        #[arg(long)]
+        domains_file: Option<String>,
+        /// Use a built-in preset: russia, china, iran.
+        #[arg(long)]
+        preset: Option<String>,
+        /// Save discovered strategies and generate config.
         #[arg(long)]
         save: bool,
     },

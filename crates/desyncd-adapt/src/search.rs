@@ -1,4 +1,8 @@
 //! Strategy search: find the best bypass technique for a domain.
+//!
+//! Two-phase algorithm:
+//! - Phase 1 (fast guess): try previously successful strategies first
+//! - Phase 2 (full sweep): systematic search if guess fails
 
 use std::time::Duration;
 
@@ -20,15 +24,17 @@ pub struct SearchResult {
     pub best_score: f64,
     /// All probe results collected during the search.
     pub probes: Vec<(String, ProbeResult)>,
+    /// Whether the result came from fast guess (Phase 1).
+    pub was_fast_guess: bool,
 }
 
 /// Run a full strategy search for a domain.
 ///
 /// Algorithm:
+/// 0. Smart prediction — try known successful strategies from DB
 /// 1. Baseline (no desync) — check if domain is actually blocked
 /// 2. Single technique sweep — try each technique with default params
 /// 3. Parameter variations — for winners, try different split positions
-/// 4. Combo search — combine top 2 singles
 pub async fn find_best_strategy(
     engine: &AdaptEngine,
     domain: &str,
@@ -39,13 +45,60 @@ pub async fn find_best_strategy(
 
     info!(%domain, "starting strategy search");
 
+    // Step 0: Smart prediction — try known strategies before full sweep.
+    // First check if this exact domain has a known strategy.
+    // Then check if ANY domain has a working strategy (same ISP/DPI assumption).
+    let candidates = collect_candidate_strategies(engine, domain);
+
+    if !candidates.is_empty() {
+        info!(
+            %domain,
+            candidates = candidates.len(),
+            "trying known strategies first (fast guess)"
+        );
+
+        for (label, strategy) in &candidates {
+            let result = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+            let score = compute_score(&result);
+            all_probes.push((format!("guess:{}", label), result.clone()));
+
+            if result.success {
+                info!(
+                    %domain,
+                    strategy = %label,
+                    score,
+                    "fast guess succeeded!"
+                );
+
+                // Save to DB.
+                if let Ok(sid) = engine
+                    .store
+                    .save_strategy(&strategy.name, &strategy.techniques)
+                {
+                    let _ = engine.store.update_domain_strategy(domain, sid, score);
+                }
+
+                return Ok(SearchResult {
+                    domain: domain.to_string(),
+                    best_strategy: Some(strategy.clone()),
+                    best_score: score,
+                    probes: all_probes,
+                    was_fast_guess: true,
+                });
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        debug!(%domain, "fast guess failed, falling back to full sweep");
+    }
+
     // Step 1: Baseline test.
     let baseline = probe::probe_domain(domain, port, None, timeout).await;
     all_probes.push(("baseline".into(), baseline.clone()));
 
     if baseline.success {
         info!(%domain, "baseline succeeded — domain is not blocked");
-        // Save baseline result.
         let _ = engine.store.save_test_result(
             domain,
             None,
@@ -59,6 +112,7 @@ pub async fn find_best_strategy(
             best_strategy: None,
             best_score: 0.0,
             probes: all_probes,
+            was_fast_guess: false,
         });
     }
 
@@ -144,7 +198,7 @@ pub async fn find_best_strategy(
                     fake_type: None,
                     sni_mode: None,
                     host_mode: None,
-                stealth: None,
+                    stealth: None,
                 }],
             };
 
@@ -210,12 +264,50 @@ pub async fn find_best_strategy(
         best_strategy,
         best_score,
         probes: all_probes,
+        was_fast_guess: false,
     })
+}
+
+/// Collect candidate strategies from the database for smart prediction.
+///
+/// Priority order:
+/// 1. Exact domain match (e.g. facebook.com already tested)
+/// 2. Best strategy from any other domain (same ISP assumption)
+fn collect_candidate_strategies(engine: &AdaptEngine, domain: &str) -> Vec<(String, Strategy)> {
+    let mut candidates = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
+    // Try exact domain match first.
+    if let Ok(Some(record)) = engine.store.get_best_strategy(domain) {
+        seen_names.insert(record.name.clone());
+        candidates.push((
+            format!("exact:{}", domain),
+            Strategy {
+                name: record.name,
+                techniques: record.techniques,
+            },
+        ));
+    }
+
+    // Try best strategy from any domain (cross-domain prediction).
+    if let Ok(Some(record)) = engine.store.get_any_best_strategy() {
+        if !seen_names.contains(&record.name) {
+            candidates.push((
+                format!("cross-domain:{}", record.name),
+                Strategy {
+                    name: record.name,
+                    techniques: record.techniques,
+                },
+            ));
+        }
+    }
+
+    candidates
 }
 
 /// Compute a score for a probe result.
 ///
-/// `score = success * 100 - latency_ms * 0.01 - complexity * 2`
+/// `score = success * 100 - latency_ms * 0.01`
 fn compute_score(result: &ProbeResult) -> f64 {
     if !result.success {
         return 0.0;
