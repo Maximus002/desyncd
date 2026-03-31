@@ -43,7 +43,13 @@ impl Store {
                     updated_at = datetime('now')",
                 rusqlite::params![name, json],
             )?;
-            let id = conn.last_insert_rowid();
+            // last_insert_rowid() returns 0 on ON CONFLICT UPDATE,
+            // so always query the actual id by name.
+            let id: i64 = conn.query_row(
+                "SELECT id FROM strategies WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )?;
             debug!(name, id, "saved strategy");
             Ok(id)
         })

@@ -47,9 +47,10 @@ impl Store {
         Ok(store)
     }
 
-    /// Run schema migrations.
+    /// Run schema migrations and enable foreign keys.
     fn migrate(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(schema::MIGRATIONS)?;
         Ok(())
     }
