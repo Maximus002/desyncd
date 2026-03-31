@@ -84,11 +84,14 @@ pub async fn handle_client(
             let port = client.read_u16().await?;
             let domain = String::from_utf8(domain_bytes)?;
 
-            // Resolve domain.
+            // Resolve domain, preferring IPv4 over IPv6.
             let addr_str = format!("{}:{}", domain, port);
-            let addr = lookup_host(&addr_str)
-                .await?
-                .next()
+            let addrs: Vec<SocketAddr> = lookup_host(&addr_str).await?.collect();
+            let addr = addrs
+                .iter()
+                .find(|a| a.is_ipv4())
+                .or_else(|| addrs.first())
+                .copied()
                 .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))?;
 
             (addr, Some(domain))
@@ -223,9 +226,12 @@ pub async fn handle_socks4(
         }
         let domain = String::from_utf8(domain_bytes)?;
         let addr_str = format!("{}:{}", domain, port);
-        let addr = lookup_host(&addr_str)
-            .await?
-            .next()
+        let addrs: Vec<SocketAddr> = lookup_host(&addr_str).await?.collect();
+        let addr = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
             .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))?;
         (addr, Some(domain))
     } else {

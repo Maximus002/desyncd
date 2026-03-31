@@ -374,16 +374,27 @@ fn generate_config(
         priority += 1;
     }
 
-    // Add a passthrough catch-all rule.
-    strategies.insert(
-        "passthrough".into(),
-        desyncd_config::StrategyDef {
-            techniques: vec![],
-        },
-    );
+    // Use the first discovered strategy as the default for all connections.
+    // Techniques like tls_record_frag are harmless for non-blocked sites
+    // (servers MUST reassemble fragmented TLS records per RFC 5246),
+    // so applying them universally is safe and catches CDN domains
+    // (e.g. *.fbcdn.net for facebook.com) that share the same DPI rules.
+    let default_strategy_name = if let Some((domain, _)) = discovered.first() {
+        domain.replace('.', "_").replace('*', "wildcard")
+    } else {
+        // No discovered strategies — use passthrough.
+        strategies.insert(
+            "passthrough".into(),
+            desyncd_config::StrategyDef {
+                techniques: vec![],
+            },
+        );
+        "passthrough".into()
+    };
+
     rules.push(desyncd_strategy::MatchRule {
         domains: vec!["*".into()],
-        strategy: "passthrough".into(),
+        strategy: default_strategy_name,
         priority: 0,
     });
 

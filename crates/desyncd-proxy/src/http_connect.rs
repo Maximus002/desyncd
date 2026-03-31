@@ -4,10 +4,12 @@
 //! - `CONNECT host:port HTTP/1.x` — tunnel mode for HTTPS
 //! - `GET/POST/... http://host/path HTTP/1.x` — forward proxy for plain HTTP
 
+use std::net::SocketAddr;
+
 use desyncd_strategy::Selector;
 use desyncd_types::StealthConfig;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 use tracing::{debug, info, warn};
 
 use crate::relay;
@@ -114,8 +116,11 @@ async fn handle_connect_tunnel(
 
     info!(%peer_addr, %host, port, "HTTP CONNECT");
 
+    // Resolve hostname, preferring IPv4 over IPv6.
     let addr_str = format!("{}:{}", host, port);
-    let upstream = match TcpStream::connect(&addr_str).await {
+    let resolved = resolve_prefer_ipv4(&addr_str).await?;
+
+    let upstream = match TcpStream::connect(resolved).await {
         Ok(s) => s,
         Err(e) => {
             warn!(%addr_str, error = %e, "failed to connect to target");
@@ -154,7 +159,8 @@ async fn handle_forward_proxy(
     info!(%peer_addr, %host, port, %path, %method, "HTTP forward proxy");
 
     let addr_str = format!("{}:{}", host, port);
-    let mut upstream = match TcpStream::connect(&addr_str).await {
+    let resolved = resolve_prefer_ipv4(&addr_str).await?;
+    let mut upstream = match TcpStream::connect(resolved).await {
         Ok(s) => s,
         Err(e) => {
             warn!(%addr_str, error = %e, "failed to connect to target");
@@ -285,6 +291,17 @@ fn parse_absolute_url(url: &str) -> anyhow::Result<(String, u16, String)> {
     };
 
     Ok((host, port, path.to_string()))
+}
+
+/// Resolve a hostname, preferring IPv4 addresses over IPv6.
+async fn resolve_prefer_ipv4(addr_str: &str) -> anyhow::Result<SocketAddr> {
+    let addrs: Vec<SocketAddr> = lookup_host(addr_str).await?.collect();
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", addr_str))
 }
 
 // Keep the old function name as a public alias for backwards compat.
