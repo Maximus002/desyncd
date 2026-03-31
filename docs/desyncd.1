@@ -1,0 +1,130 @@
+.TH DESYNCD 1 "2026-03-31" "desyncd 0.1.0" "User Commands"
+.SH NAME
+desyncd \- adaptive DPI desynchronization tool
+.SH SYNOPSIS
+.B desyncd
+[\fIOPTIONS\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+.B desyncd
+is a cross-platform DPI bypass tool that automatically discovers and applies
+the best desynchronization strategies for your ISP and target domains. It
+operates as a local SOCKS5/HTTP CONNECT proxy, applying protocol-level
+techniques to prevent deep packet inspection systems from identifying and
+blocking connections.
+.SH COMMANDS
+.TP
+.B run
+Start the proxy/interceptor. This is the default command if none is specified.
+.TP
+.B test \-\-domain \fIDOMAIN\fR [\-\-all\-techniques]
+Run block detection tests against the specified domains. With
+.B \-\-all\-techniques
+, tests every available bypass technique and shows results in a table.
+.TP
+.B adapt \-\-domain \fIDOMAIN\fR [\-\-save]
+Run auto-adaptation to discover the best bypass strategy for each domain.
+With
+.B \-\-save
+, stores the discovered strategy in the SQLite database for future use.
+.TP
+.B show\-config
+Print the effective configuration after merging defaults, config file, and CLI arguments.
+.SH OPTIONS
+.TP
+.B \-m, \-\-mode \fIMODE\fR
+Operating mode:
+.B socks
+(SOCKS5 + HTTP CONNECT, default),
+.B transparent
+(Linux iptables REDIRECT),
+.B nfq
+(Linux NFQUEUE).
+.TP
+.B \-l, \-\-listen \fIADDR\fR
+Proxy listen address. Default: 127.0.0.1:1080
+.TP
+.B \-c, \-\-config \fIPATH\fR
+Path to TOML configuration file. Searched in:
+~/.config/desyncd/config.toml, then ./desyncd.toml
+.TP
+.B \-s, \-\-strategy \fINAME\fR
+Override the default strategy for all connections.
+.TP
+.B \-v, \-\-verbose
+Increase log verbosity. Use \-v for debug, \-vv for trace.
+.SH TECHNIQUES
+.TP
+.B tcp_split
+Splits TCP segment at the SNI position into multiple sends.
+.TP
+.B tls_record_frag
+Fragments the TLS ClientHello into multiple TLS records.
+.TP
+.B fake_packet
+Injects a fake TLS record before the real ClientHello.
+.TP
+.B disorder
+Sends split segments in reverse order.
+.TP
+.B sni_manip
+Modifies the SNI field (mixed case, removal, padding).
+.TP
+.B http_host
+Modifies the HTTP Host header (mixed case, extra spaces, tabs).
+.SH CONFIGURATION
+Configuration is in TOML format. Key sections:
+.TP
+.B [general]
+mode, log_level
+.TP
+.B [proxy]
+listen address
+.TP
+.B [stealth]
+split_jitter, timing_jitter_us, fake_size_range, randomize_tls_padding
+.TP
+.B [adaptation]
+enabled, test_interval_secs, test_domains
+.TP
+.B [strategies.\fINAME\fR]
+Named strategy with ordered list of techniques
+.TP
+.B [[rules]]
+Domain-to-strategy mapping with priority
+.SH EXAMPLES
+.PP
+Start with default config:
+.RS
+.B desyncd run
+.RE
+.PP
+Test all techniques against youtube.com:
+.RS
+.B desyncd test \-\-domain youtube.com \-\-all\-techniques
+.RE
+.PP
+Find best strategy and save:
+.RS
+.B desyncd adapt \-\-domain youtube.com \-\-save
+.RE
+.PP
+Use custom config with verbose logging:
+.RS
+.B desyncd \-c /etc/desyncd/config.toml \-vv run
+.RE
+.PP
+Transparent mode (Linux, requires root):
+.RS
+.B sudo desyncd run \-\-mode transparent \-\-listen 0.0.0.0:1080
+.RE
+.SH FILES
+.TP
+.I ~/.config/desyncd/config.toml
+Default configuration file location.
+.TP
+.I ~/.local/share/desyncd/state.db
+SQLite database for adaptation results.
+.SH AUTHORS
+desyncd contributors
+.SH LICENSE
+MIT OR Apache-2.0

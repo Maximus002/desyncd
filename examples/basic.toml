@@ -1,0 +1,19 @@
+# Minimal SOCKS5 proxy configuration.
+# Start with: desyncd --config examples/basic.toml run
+
+[general]
+mode = "socks"
+log_level = "info"
+
+[proxy]
+listen = "127.0.0.1:1080"
+
+[strategies.default_tls]
+techniques = [
+    { name = "tcp_split", split_position = "Sni" },
+]
+
+[[rules]]
+domains = ["*"]
+strategy = "default_tls"
+priority = 0

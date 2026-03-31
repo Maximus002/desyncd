@@ -1,0 +1,23 @@
+[package]
+name = "desyncd-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "desyncd"
+path = "src/main.rs"
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+desyncd-config = { path = "../desyncd-config" }
+desyncd-desync = { path = "../desyncd-desync" }
+desyncd-strategy = { path = "../desyncd-strategy" }
+desyncd-proxy = { path = "../desyncd-proxy" }
+desyncd-store = { path = "../desyncd-store" }
+desyncd-adapt = { path = "../desyncd-adapt" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "desyncd-strategy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+desyncd-desync = { path = "../desyncd-desync" }
+serde.workspace = true
+tracing.workspace = true

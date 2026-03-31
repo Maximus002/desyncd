@@ -1,0 +1,54 @@
+# Aggressive configuration with all stealth features enabled.
+# Use when basic techniques are detected by DPI.
+
+[general]
+mode = "socks"
+log_level = "info"
+
+[proxy]
+listen = "127.0.0.1:1080"
+
+[stealth]
+split_jitter = 4
+timing_jitter_us = 800
+randomize_tls_padding = true
+fake_size_range = [48, 200]
+
+[adaptation]
+enabled = true
+test_interval_secs = 14400  # 4 hours
+test_domains = ["youtube.com", "rutracker.org"]
+
+[strategies.stealth_split]
+techniques = [
+    { name = "fake_packet" },
+    { name = "tls_record_frag", split_position = "Sni" },
+    { name = "tcp_split", split_position = { SniOffset = -2 } },
+]
+
+[strategies.disorder_combo]
+techniques = [
+    { name = "fake_packet" },
+    { name = "disorder", split_position = "Sni" },
+]
+
+[strategies.sni_trick]
+techniques = [
+    { name = "sni_manip", sni_mode = "MixedCase" },
+    { name = "tcp_split", split_position = "Sni" },
+]
+
+[[rules]]
+domains = ["*.youtube.com", "*.googlevideo.com", "*.ytimg.com"]
+strategy = "stealth_split"
+priority = 10
+
+[[rules]]
+domains = ["*.discord.com", "*.discord.gg", "*.discordapp.com"]
+strategy = "disorder_combo"
+priority = 10
+
+[[rules]]
+domains = ["*"]
+strategy = "sni_trick"
+priority = 0

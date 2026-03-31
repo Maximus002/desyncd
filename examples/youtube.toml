@@ -1,0 +1,55 @@
+# Optimized for video streaming sites (YouTube, Twitch, etc).
+# Prioritizes reliability and low latency over stealth.
+
+[general]
+mode = "socks"
+log_level = "info"
+
+[proxy]
+listen = "127.0.0.1:1080"
+
+[stealth]
+split_jitter = 2
+timing_jitter_us = 200  # Low jitter to minimize latency impact
+
+[strategies.video_bypass]
+# TLS record fragmentation is the most reliable technique for HTTPS video.
+techniques = [
+    { name = "tls_record_frag", split_position = "Sni" },
+]
+
+[strategies.video_aggressive]
+# Fallback: combine fake packet + TLS frag + TCP split.
+techniques = [
+    { name = "fake_packet" },
+    { name = "tls_record_frag", split_position = "Sni" },
+    { name = "tcp_split", split_position = { SniOffset = -1 } },
+]
+
+[strategies.passthrough]
+techniques = []
+
+[[rules]]
+domains = [
+    "*.youtube.com",
+    "*.googlevideo.com",
+    "*.ytimg.com",
+    "*.ggpht.com",
+]
+strategy = "video_bypass"
+priority = 10
+
+[[rules]]
+domains = [
+    "*.twitch.tv",
+    "*.ttvnw.net",
+    "*.jtvnw.net",
+]
+strategy = "video_bypass"
+priority = 10
+
+# Don't apply desync to non-blocked sites.
+[[rules]]
+domains = ["*"]
+strategy = "passthrough"
+priority = 0

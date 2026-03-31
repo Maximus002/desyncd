@@ -1,0 +1,9 @@
+[package]
+name = "desyncd-packet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+tracing.workspace = true

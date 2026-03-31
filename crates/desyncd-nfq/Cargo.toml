@@ -1,0 +1,15 @@
+[package]
+name = "desyncd-nfq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+desyncd-packet = { path = "../desyncd-packet" }
+desyncd-desync = { path = "../desyncd-desync" }
+desyncd-strategy = { path = "../desyncd-strategy" }
+desyncd-platform = { path = "../desyncd-platform" }
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

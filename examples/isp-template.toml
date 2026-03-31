@@ -1,0 +1,67 @@
+# ISP-specific configuration template.
+#
+# To use:
+# 1. Copy this file: cp examples/isp-template.toml ~/.config/desyncd/config.toml
+# 2. Run adaptation to find what works for your ISP:
+#    desyncd adapt --domain youtube.com --save
+# 3. Update strategies below based on adaptation results.
+# 4. Add your blocked domains to the rules section.
+
+[general]
+mode = "socks"
+log_level = "info"
+
+[proxy]
+listen = "127.0.0.1:1080"
+
+[adaptation]
+enabled = true
+test_interval_secs = 21600  # Re-test every 6 hours
+test_domains = ["youtube.com"]  # Add domains you access frequently
+
+[stealth]
+split_jitter = 4
+timing_jitter_us = 500
+randomize_tls_padding = true
+
+# --- Define your strategies ---
+# Run `desyncd test --domain example.com --all-techniques` to find
+# which techniques work for your ISP, then define strategies here.
+
+[strategies.default_bypass]
+techniques = [
+    { name = "tcp_split", split_position = "Sni" },
+]
+
+# Uncomment and customize based on adaptation results:
+#
+# [strategies.isp_optimized]
+# techniques = [
+#     { name = "fake_packet" },
+#     { name = "tls_record_frag", split_position = "Sni" },
+# ]
+#
+# [strategies.http_bypass]
+# techniques = [
+#     { name = "http_host", host_mode = "MixedCase" },
+# ]
+
+# --- Domain rules ---
+# Add blocked domains here. Higher priority wins on conflict.
+# Use "*.domain.com" for wildcard subdomains.
+
+[[rules]]
+domains = ["*.youtube.com", "*.googlevideo.com"]
+strategy = "default_bypass"
+priority = 10
+
+# Add more rules as needed:
+# [[rules]]
+# domains = ["*.blocked-site.com"]
+# strategy = "default_bypass"
+# priority = 10
+
+[[rules]]
+domains = ["*"]
+strategy = "default_bypass"
+priority = 0

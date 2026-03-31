@@ -1,0 +1,12 @@
+[package]
+name = "desyncd-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+async-trait = "0.1"

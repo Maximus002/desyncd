@@ -1,0 +1,16 @@
+[package]
+name = "desyncd-adapt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+desyncd-types = { path = "../desyncd-types" }
+desyncd-desync = { path = "../desyncd-desync" }
+desyncd-store = { path = "../desyncd-store" }
+desyncd-strategy = { path = "../desyncd-strategy" }
+tokio.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+fastrand.workspace = true

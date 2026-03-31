@@ -1,0 +1,53 @@
+# desyncd — default configuration
+# Copy to ~/.config/desyncd/config.toml and customize.
+
+[general]
+mode = "socks"
+log_level = "info"
+
+[proxy]
+listen = "127.0.0.1:1080"
+socks5 = true
+
+# --- Strategies ---
+# Each strategy is an ordered list of desync techniques.
+# The first applicable technique is applied.
+
+[strategies.default_tls]
+# Simple TCP split at SNI position — works against many basic DPI systems.
+techniques = [
+    { name = "tcp_split", split_position = "Sni" },
+]
+
+[strategies.tls_frag]
+# TLS record-layer fragmentation — splits the ClientHello into two TLS records.
+# More reliable than TCP split as it works at the application layer.
+techniques = [
+    { name = "tls_record_frag", split_position = "Sni" },
+]
+
+[strategies.aggressive]
+# Combines TLS record fragmentation with TCP split for maximum bypass.
+techniques = [
+    { name = "tls_record_frag", split_position = "Sni" },
+    { name = "tcp_split", split_position = { SniOffset = -2 } },
+]
+
+# --- Rules ---
+# Map domains to strategies. Higher priority wins on conflict.
+# Use "*" as a catch-all. Use "*.domain.com" for wildcard subdomains.
+
+[[rules]]
+domains = ["*.youtube.com", "*.googlevideo.com", "*.ytimg.com"]
+strategy = "aggressive"
+priority = 10
+
+[[rules]]
+domains = ["*.discord.com", "*.discord.gg", "*.discordapp.com"]
+strategy = "tls_frag"
+priority = 10
+
+[[rules]]
+domains = ["*"]
+strategy = "default_tls"
+priority = 0

@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Node (GUI frontend)
+node_modules/
+crates/desyncd-gui/frontend/dist/
+
+# Database
+*.db
+*.db-journal
+
+# Environment
+.env
