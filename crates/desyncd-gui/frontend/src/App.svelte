@@ -3,6 +3,7 @@
   import StrategyPanel from './lib/StrategyPanel.svelte';
   import TestPanel from './lib/TestPanel.svelte';
   import ConfigPanel from './lib/ConfigPanel.svelte';
+  import AdaptPanel from './lib/AdaptPanel.svelte';
 
   let activeTab = $state('status');
 </script>
@@ -13,6 +14,9 @@
     <nav>
       <button class:active={activeTab === 'status'} onclick={() => activeTab = 'status'}>
         Status
+      </button>
+      <button class:active={activeTab === 'adapt'} onclick={() => activeTab = 'adapt'}>
+        Adapt
       </button>
       <button class:active={activeTab === 'strategies'} onclick={() => activeTab = 'strategies'}>
         Strategies
@@ -29,6 +33,8 @@
   <section class="content">
     {#if activeTab === 'status'}
       <StatusPanel />
+    {:else if activeTab === 'adapt'}
+      <AdaptPanel />
     {:else if activeTab === 'strategies'}
       <StrategyPanel />
     {:else if activeTab === 'test'}

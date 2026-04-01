@@ -76,6 +76,21 @@ struct ProbeResultInfo {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdaptResultInfo {
+    domain: String,
+    strategy: Option<String>,
+    score: f64,
+    stealth: bool,
+    probes: Vec<ProbeResultInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AdaptResponse {
+    results: Vec<AdaptResultInfo>,
+    config_path: Option<String>,
+}
+
 // --- Tauri Commands ---
 
 #[tauri::command]
@@ -281,6 +296,203 @@ async fn test_domain(domain: String) -> Result<Vec<ProbeResultInfo>, String> {
     Ok(results)
 }
 
+#[tauri::command]
+fn get_presets() -> Vec<String> {
+    vec![
+        "russia".into(),
+        "china".into(),
+        "iran".into(),
+        "test".into(),
+    ]
+}
+
+#[tauri::command]
+async fn adapt_domains(
+    domains: Vec<String>,
+    save: bool,
+    app: tauri::AppHandle,
+) -> Result<AdaptResponse, String> {
+    if domains.is_empty() {
+        return Err("No domains specified".into());
+    }
+
+    let cli = desyncd_config::Cli {
+        mode: None,
+        listen: None,
+        config: None,
+        strategy: None,
+        verbose: 0,
+        command: None,
+    };
+    let config = desyncd_config::AppConfig::load(&cli).map_err(|e| e.to_string())?;
+
+    let db_path = expand_tilde(&config.db_path);
+    let store = desyncd_store::Store::open(&db_path).map_err(|e| e.to_string())?;
+
+    let adapt_config = desyncd_adapt::AdaptConfig {
+        enabled: true,
+        test_domains: domains.clone(),
+        secure_dns: config.adaptation.secure_dns,
+        ..Default::default()
+    };
+
+    let engine = desyncd_adapt::AdaptEngine::new(store, adapt_config);
+    let mut results = Vec::new();
+    let mut discovered: Vec<(String, desyncd_strategy::Strategy)> = Vec::new();
+
+    for (i, domain) in domains.iter().enumerate() {
+        // Emit progress event.
+        let _ = app.emit("adapt-progress", serde_json::json!({
+            "current": i + 1,
+            "total": domains.len(),
+            "domain": domain,
+        }));
+
+        let search_result = desyncd_adapt::search::find_best_strategy(&engine, domain)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let probes: Vec<ProbeResultInfo> = search_result
+            .probes
+            .iter()
+            .map(|(label, p)| ProbeResultInfo {
+                technique: label.clone(),
+                success: p.success,
+                latency_ms: p.latency.as_millis(),
+                error: p.error.clone(),
+            })
+            .collect();
+
+        let strategy_name = search_result
+            .best_strategy
+            .as_ref()
+            .map(|s| s.name.clone());
+
+        if let Some(ref strategy) = search_result.best_strategy {
+            if save {
+                let _ = engine.store.save_strategy(&strategy.name, &strategy.techniques)
+                    .and_then(|sid| engine.store.update_domain_strategy(domain, sid, search_result.best_score));
+            }
+            discovered.push((domain.clone(), strategy.clone()));
+        }
+
+        results.push(AdaptResultInfo {
+            domain: domain.clone(),
+            strategy: strategy_name,
+            score: search_result.best_score,
+            stealth: search_result.stealth_used,
+            probes,
+        });
+    }
+
+    let config_path = if save && !discovered.is_empty() {
+        let path = resolve_config_path();
+        generate_config_for_gui(&config, &discovered, &path).map_err(|e| e.to_string())?;
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    Ok(AdaptResponse { results, config_path })
+}
+
+/// Generate config from GUI adapt results.
+fn generate_config_for_gui(
+    base_config: &desyncd_config::AppConfig,
+    discovered: &[(String, desyncd_strategy::Strategy)],
+    output_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    let mut strategies = HashMap::new();
+    let mut rules = Vec::new();
+    let mut priority = 10i32;
+
+    for (domain, strategy) in discovered {
+        let strategy_name = domain.replace('.', "_").replace('*', "wildcard");
+        strategies.insert(
+            strategy_name.clone(),
+            desyncd_config::StrategyDef { techniques: strategy.techniques.clone() },
+        );
+        rules.push(desyncd_strategy::MatchRule {
+            domains: vec![domain.clone(), format!("*.{}", domain)],
+            strategy: strategy_name,
+            priority,
+        });
+        priority += 1;
+    }
+
+    let default_strategy = discovered.first()
+        .map(|(d, _)| d.replace('.', "_").replace('*', "wildcard"))
+        .unwrap_or_else(|| "passthrough".into());
+
+    rules.push(desyncd_strategy::MatchRule {
+        domains: vec!["*".into()],
+        strategy: default_strategy,
+        priority: 0,
+    });
+
+    let config_file = desyncd_config::ConfigFile {
+        general: desyncd_config::GeneralConfig {
+            mode: base_config.mode,
+            log_level: base_config.log_level.clone(),
+        },
+        proxy: desyncd_config::ProxyConfig {
+            listen: base_config.listen,
+            socks5: true,
+        },
+        adaptation: desyncd_config::AdaptationConfig {
+            enabled: true,
+            test_interval_secs: base_config.adaptation.test_interval_secs,
+            test_domains: discovered.iter().map(|(d, _)| d.clone()).collect(),
+            db_path: base_config.db_path.clone(),
+            secure_dns: base_config.adaptation.secure_dns,
+        },
+        stealth: desyncd_adapt::search::recommended_stealth(),
+        strategies,
+        rules,
+    };
+
+    let toml_str = toml::to_string_pretty(&config_file)?;
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::File::create(output_path)?;
+    writeln!(file, "# desyncd configuration")?;
+    writeln!(file, "# Auto-generated by desyncd GUI")?;
+    writeln!(file)?;
+    file.write_all(toml_str.as_bytes())?;
+    Ok(())
+}
+
+fn resolve_config_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let config_dir = std::env::var("HOME").ok()
+        .map(|h| PathBuf::from(h).join(".config/desyncd"));
+    #[cfg(target_os = "linux")]
+    let config_dir = std::env::var("XDG_CONFIG_HOME").ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+        .map(|p| p.join("desyncd"));
+    #[cfg(target_os = "windows")]
+    let config_dir = std::env::var("APPDATA").ok()
+        .map(|a| PathBuf::from(a).join("desyncd"));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let config_dir: Option<PathBuf> = None;
+
+    config_dir.unwrap_or_else(|| PathBuf::from(".")).join("config.toml")
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    PathBuf::from(path)
+}
+
 fn main() {
     // Initialize tracing.
     tracing_subscriber::fmt()
@@ -302,6 +514,8 @@ fn main() {
             stop_proxy,
             get_config,
             test_domain,
+            get_presets,
+            adapt_domains,
         ])
         .run(tauri::generate_context!())
         .expect("error running tauri application");

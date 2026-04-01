@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use desyncd_desync::technique::TechniqueConfig;
 use desyncd_strategy::Strategy;
-use desyncd_types::SplitPosition;
+use desyncd_types::{SplitPosition, StealthConfig};
 use tracing::{debug, info};
 
 use crate::probe::{self, ProbeResult};
@@ -26,6 +26,8 @@ pub struct SearchResult {
     pub probes: Vec<(String, ProbeResult)>,
     /// Whether the result came from fast guess (Phase 1).
     pub was_fast_guess: bool,
+    /// Whether stealth flags were needed for success.
+    pub stealth_used: bool,
 }
 
 /// Number of confirmation probes for fast guess validation.
@@ -115,6 +117,7 @@ pub async fn find_best_strategy(
                     best_score: score,
                     probes: all_probes,
                     was_fast_guess: true,
+                    stealth_used: false,
                 });
             }
 
@@ -152,6 +155,7 @@ pub async fn find_best_strategy(
             best_score: 0.0,
             probes: all_probes,
             was_fast_guess: false,
+            stealth_used: false,
         });
     }
 
@@ -278,6 +282,63 @@ pub async fn find_best_strategy(
         });
     }
 
+    // Step 3.5: Stealth sweep — if no technique worked without stealth,
+    // retry the most promising techniques with stealth flags enabled.
+    // Stealth adds jitter and randomization that can defeat advanced DPI
+    // (e.g., ML-based classifiers or stateful DPI like ТСПУ).
+    let mut stealth_used = false;
+
+    if best_strategy.is_none() {
+        info!(%domain, "no technique worked without stealth, trying with stealth flags");
+
+        let stealth_config = Some(StealthConfig {
+            split_jitter: 4,
+            timing_jitter_us: 500,
+            randomize_tls_padding: true,
+            fake_size_range: Some((48, 200)),
+        });
+
+        let stealth_techniques = [
+            ("tls_record_frag", SplitPosition::SniOffset(-1)),
+            ("tcp_split", SplitPosition::Sni),
+            ("tls_record_frag", SplitPosition::Sni),
+            ("disorder", SplitPosition::Sni),
+        ];
+
+        for (tech_name, split_pos) in &stealth_techniques {
+            let strategy = Strategy {
+                name: format!("probe_{}_stealth", tech_name),
+                techniques: vec![TechniqueConfig {
+                    name: tech_name.to_string(),
+                    split_position: Some(split_pos.clone()),
+                    enabled: true,
+                    fake_type: None,
+                    sni_mode: None,
+                    host_mode: None,
+                    stealth: stealth_config.clone(),
+                }],
+            };
+
+            let result = probe::probe_domain_ex(domain, port, Some(&strategy), timeout, secure_dns).await;
+            let score = compute_score(&result);
+            let label = format!("{}+stealth", tech_name);
+            all_probes.push((label, result.clone()));
+
+            if result.success && score > best_score {
+                best_score = score;
+                best_strategy = Some(strategy);
+                stealth_used = true;
+                info!(technique = tech_name, score, "stealth technique succeeded!");
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            if all_probes.len() >= engine.config.max_probes {
+                break;
+            }
+        }
+    }
+
     // Step 4: Confirmation probes — verify the best strategy works reliably.
     if let Some(ref strategy) = best_strategy {
         let confirm_count = 2;
@@ -348,6 +409,7 @@ pub async fn find_best_strategy(
         best_score,
         probes: all_probes,
         was_fast_guess: false,
+        stealth_used,
     })
 }
 
@@ -402,6 +464,19 @@ fn collect_candidate_strategies(engine: &AdaptEngine, domain: &str) -> Vec<(Stri
     }
 
     candidates
+}
+
+/// Recommended stealth config for generated configs.
+///
+/// These values add enough randomization to defeat ML-based DPI
+/// classifiers while keeping latency impact minimal.
+pub fn recommended_stealth() -> StealthConfig {
+    StealthConfig {
+        split_jitter: 4,
+        timing_jitter_us: 500,
+        randomize_tls_padding: true,
+        fake_size_range: Some((48, 200)),
+    }
 }
 
 /// Compute a score for a probe result.

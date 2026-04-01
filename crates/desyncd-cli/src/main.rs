@@ -342,19 +342,24 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
         }
 
         if let Some(ref strategy) = result.best_strategy {
-            let guess_tag = if result.was_fast_guess {
-                " [FAST GUESS]"
+            let mut tags = Vec::new();
+            if result.was_fast_guess { tags.push("FAST GUESS"); }
+            if result.stealth_used { tags.push("STEALTH"); }
+            let tag_str = if tags.is_empty() {
+                String::new()
             } else {
-                ""
+                format!(" [{}]", tags.join(", "))
             };
             println!(
                 "\nBest strategy: {} (score: {:.1}){}",
-                strategy.name, result.best_score, guess_tag
+                strategy.name, result.best_score, tag_str
             );
             for tech in &strategy.techniques {
                 println!(
-                    "  - {} (split: {:?})",
-                    tech.name, tech.split_position
+                    "  - {} (split: {:?}{})",
+                    tech.name,
+                    tech.split_position,
+                    if tech.stealth.is_some() { ", stealth: on" } else { "" }
                 );
             }
 
@@ -501,7 +506,7 @@ fn generate_config(
             db_path: base_config.db_path.clone(),
             secure_dns: base_config.adaptation.secure_dns,
         },
-        stealth: base_config.stealth.clone(),
+        stealth: desyncd_adapt::search::recommended_stealth(),
         strategies,
         rules,
     };
