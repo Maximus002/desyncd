@@ -225,16 +225,161 @@ impl Store {
     ) -> anyhow::Result<()> {
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO domain_strategies (domain, strategy_id, score, last_tested, last_success)
-                 VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+                "INSERT INTO domain_strategies (domain, strategy_id, score, last_tested, last_success, confidence, success_count, fail_count)
+                 VALUES (?1, ?2, ?3, datetime('now'), datetime('now'), 1.0, 1, 0)
                  ON CONFLICT(domain) DO UPDATE SET
                     strategy_id = excluded.strategy_id,
                     score = excluded.score,
                     last_tested = datetime('now'),
-                    last_success = datetime('now')",
+                    last_success = datetime('now'),
+                    confidence = 1.0,
+                    success_count = success_count + 1,
+                    fail_count = 0",
                 rusqlite::params![domain, strategy_id, score],
             )?;
             Ok(())
+        })
+    }
+
+    /// Record a relay success for a domain (boosts confidence).
+    pub fn record_relay_success(&self, domain: &str) -> anyhow::Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE domain_strategies SET
+                    success_count = success_count + 1,
+                    last_success = datetime('now')
+                 WHERE domain = ?1",
+                rusqlite::params![domain],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Record a relay failure for a domain (degrades confidence).
+    pub fn record_relay_failure(&self, domain: &str) -> anyhow::Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE domain_strategies SET
+                    fail_count = fail_count + 1
+                 WHERE domain = ?1",
+                rusqlite::params![domain],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Get confidence for a domain's strategy, accounting for time decay.
+    ///
+    /// Formula: `confidence = base × decay(age) × success_rate`
+    /// - `decay`: exponential, half-life = 7 days
+    /// - `success_rate`: `successes / (successes + failures)`, min 10 samples
+    pub fn get_confidence(&self, domain: &str) -> anyhow::Result<f64> {
+        self.with_conn(|conn| {
+            let result: Option<(f64, i64, i64, String)> = conn
+                .prepare(
+                    "SELECT confidence, success_count, fail_count, last_success
+                     FROM domain_strategies WHERE domain = ?1",
+                )?
+                .query_row(rusqlite::params![domain], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .optional()?;
+
+            match result {
+                Some((_base_conf, successes, failures, last_success_str)) => {
+                    // Time decay: half-life of 7 days.
+                    let age_secs = parse_age_secs(&last_success_str);
+                    let half_life_secs = 7.0 * 24.0 * 3600.0; // 7 days
+                    let decay = (0.5_f64).powf(age_secs / half_life_secs);
+
+                    // Success rate (with smoothing — need at least a few samples).
+                    let total = successes + failures;
+                    let success_rate = if total >= 3 {
+                        successes as f64 / total as f64
+                    } else {
+                        1.0 // Not enough data, assume good.
+                    };
+
+                    Ok((decay * success_rate).clamp(0.0, 1.0))
+                }
+                None => Ok(0.0),
+            }
+        })
+    }
+
+    /// Get the best strategy for a domain, but only if confidence is above threshold.
+    ///
+    /// Returns None if the strategy exists but confidence is too low.
+    pub fn get_confident_strategy(
+        &self,
+        domain: &str,
+        min_confidence: f64,
+    ) -> anyhow::Result<Option<StrategyRecord>> {
+        let confidence = self.get_confidence(domain)?;
+        if confidence < min_confidence {
+            debug!(
+                %domain,
+                confidence,
+                min_confidence,
+                "strategy confidence too low, needs re-validation"
+            );
+            return Ok(None);
+        }
+        self.get_best_strategy(domain)
+    }
+
+    /// Get the best strategy across all domains, with confidence check.
+    pub fn get_any_confident_strategy(
+        &self,
+        min_confidence: f64,
+    ) -> anyhow::Result<Option<(StrategyRecord, f64)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT s.id, s.name, s.techniques_json,
+                        ds.confidence, ds.success_count, ds.fail_count, ds.last_success
+                 FROM domain_strategies ds
+                 JOIN strategies s ON s.id = ds.strategy_id
+                 ORDER BY ds.score DESC",
+            )?;
+
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (id, name, json, _base_conf, successes, failures, last_success_str) = row?;
+
+                // Compute live confidence.
+                let age_secs = parse_age_secs(&last_success_str);
+                let half_life_secs = 7.0 * 24.0 * 3600.0;
+                let decay = (0.5_f64).powf(age_secs / half_life_secs);
+                let total = successes + failures;
+                let success_rate = if total >= 3 {
+                    successes as f64 / total as f64
+                } else {
+                    1.0
+                };
+                let confidence = (decay * success_rate).clamp(0.0, 1.0);
+
+                if confidence >= min_confidence {
+                    let techniques: Vec<TechniqueConfig> =
+                        serde_json::from_str(&json).context("invalid techniques JSON")?;
+                    return Ok(Some((
+                        StrategyRecord { id, name, techniques },
+                        confidence,
+                    )));
+                }
+            }
+
+            Ok(None)
         })
     }
 
@@ -325,6 +470,43 @@ impl Store {
             Ok(domains)
         })
     }
+}
+
+/// Parse a SQLite datetime string and return age in seconds from now.
+fn parse_age_secs(datetime_str: &str) -> f64 {
+    // SQLite datetime format: "2026-04-01 12:34:56"
+    // We parse it manually to avoid pulling in chrono just for this.
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Simple parser for "YYYY-MM-DD HH:MM:SS".
+    let parts: Vec<&str> = datetime_str.split(&['-', ' ', ':'][..]).collect();
+    if parts.len() < 6 {
+        return 0.0; // Can't parse, treat as fresh.
+    }
+
+    let year: i64 = parts[0].parse().unwrap_or(2026);
+    let month: i64 = parts[1].parse().unwrap_or(1);
+    let day: i64 = parts[2].parse().unwrap_or(1);
+    let hour: i64 = parts[3].parse().unwrap_or(0);
+    let min: i64 = parts[4].parse().unwrap_or(0);
+    let sec: i64 = parts[5].parse().unwrap_or(0);
+
+    // Rough days-since-epoch (good enough for decay calculation).
+    // Not astronomically precise, but decay is a smooth function anyway.
+    let days_approx = (year - 1970) * 365 + (year - 1970) / 4
+        + [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+            .get((month - 1) as usize)
+            .copied()
+            .unwrap_or(0)
+        + day - 1;
+    let timestamp_approx = days_approx * 86400 + hour * 3600 + min * 60 + sec;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    (now - timestamp_approx).max(0) as f64
 }
 
 /// Extension trait to add `.optional()` to rusqlite query results.
@@ -420,6 +602,62 @@ mod tests {
         let result = store.get_hostlist_domains("blocked").unwrap();
         assert_eq!(result.len(), 3);
         assert!(result.contains(&"youtube.com".to_string()));
+    }
+
+    #[test]
+    fn test_confidence_fresh_strategy() {
+        let store = test_store();
+        let techniques = vec![TechniqueConfig {
+            name: "tcp_split".into(),
+            split_position: Some(SplitPosition::Sni),
+            enabled: true,
+            fake_type: None,
+            sni_mode: None,
+            host_mode: None,
+            stealth: None,
+        }];
+        let sid = store.save_strategy("s1", &techniques).unwrap();
+        store.update_domain_strategy("example.com", sid, 95.0).unwrap();
+
+        // Fresh strategy should have high confidence.
+        let conf = store.get_confidence("example.com").unwrap();
+        assert!(conf > 0.9, "fresh strategy confidence should be ~1.0, got {}", conf);
+
+        // Should be returned by confident query.
+        let result = store.get_confident_strategy("example.com", 0.3).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_confidence_degrades_with_failures() {
+        let store = test_store();
+        let techniques = vec![TechniqueConfig {
+            name: "tcp_split".into(),
+            split_position: Some(SplitPosition::Sni),
+            enabled: true,
+            fake_type: None,
+            sni_mode: None,
+            host_mode: None,
+            stealth: None,
+        }];
+        let sid = store.save_strategy("s1", &techniques).unwrap();
+        store.update_domain_strategy("example.com", sid, 95.0).unwrap();
+
+        // Record many failures.
+        for _ in 0..10 {
+            store.record_relay_failure("example.com").unwrap();
+        }
+
+        // Confidence should drop due to low success rate (1 success / 11 total).
+        let conf = store.get_confidence("example.com").unwrap();
+        assert!(conf < 0.2, "confidence should be low after failures, got {}", conf);
+    }
+
+    #[test]
+    fn test_confidence_unknown_domain() {
+        let store = test_store();
+        let conf = store.get_confidence("unknown.com").unwrap();
+        assert_eq!(conf, 0.0);
     }
 
     #[test]

@@ -28,10 +28,17 @@ pub struct SearchResult {
     pub was_fast_guess: bool,
 }
 
+/// Number of confirmation probes for fast guess validation.
+const FAST_GUESS_CONFIRMS: usize = 2;
+
+/// Minimum confidence score to use a cached strategy.
+const MIN_CONFIDENCE: f64 = 0.3;
+
 /// Run a full strategy search for a domain.
 ///
 /// Algorithm:
 /// 0. Smart prediction — try known successful strategies from DB
+///    (validated with 2-3 rapid probes — single success is not enough)
 /// 1. Baseline (no desync) — check if domain is actually blocked
 /// 2. Single technique sweep — try each technique with default params
 /// 3. Parameter variations — for winners, try different split positions
@@ -46,8 +53,7 @@ pub async fn find_best_strategy(
     info!(%domain, "starting strategy search");
 
     // Step 0: Smart prediction — try known strategies before full sweep.
-    // First check if this exact domain has a known strategy.
-    // Then check if ANY domain has a working strategy (same ISP/DPI assumption).
+    // Uses confidence-aware queries: stale or failed strategies are skipped.
     let candidates = collect_candidate_strategies(engine, domain);
 
     if !candidates.is_empty() {
@@ -58,19 +64,43 @@ pub async fn find_best_strategy(
         );
 
         for (label, strategy) in &candidates {
+            // First probe — quick check.
             let result = probe::probe_domain(domain, port, Some(strategy), timeout).await;
             let score = compute_score(&result);
             all_probes.push((format!("guess:{}", label), result.clone()));
 
-            if result.success {
+            if !result.success {
+                // First probe failed — skip this candidate, record failure.
+                let _ = engine.store.record_relay_failure(domain);
+                debug!(%domain, strategy = %label, "fast guess: first probe failed");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                continue;
+            }
+
+            // First probe succeeded — validate with FAST_GUESS_CONFIRMS more.
+            let mut confirm_ok = 0usize;
+            for i in 0..FAST_GUESS_CONFIRMS {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let confirm = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+                all_probes.push((format!("guess_confirm:{}:{}", label, i + 1), confirm.clone()));
+                if confirm.success {
+                    confirm_ok += 1;
+                }
+            }
+
+            let total_ok = 1 + confirm_ok; // initial + confirmations
+            let total_probes = 1 + FAST_GUESS_CONFIRMS;
+
+            if confirm_ok == FAST_GUESS_CONFIRMS {
+                // All probes passed — high confidence.
                 info!(
                     %domain,
                     strategy = %label,
                     score,
-                    "fast guess succeeded!"
+                    probes = format!("{}/{}", total_ok, total_probes),
+                    "fast guess validated!"
                 );
 
-                // Save to DB.
                 if let Ok(sid) = engine
                     .store
                     .save_strategy(&strategy.name, &strategy.techniques)
@@ -87,10 +117,18 @@ pub async fn find_best_strategy(
                 });
             }
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Some confirmations failed — strategy is unreliable.
+            info!(
+                %domain,
+                strategy = %label,
+                passed = total_ok,
+                total = total_probes,
+                "fast guess unreliable, falling back to full sweep"
+            );
+            let _ = engine.store.record_relay_failure(domain);
         }
 
-        debug!(%domain, "fast guess failed, falling back to full sweep");
+        debug!(%domain, "all fast guesses failed, running full sweep");
     }
 
     // Step 1: Baseline test.
@@ -314,15 +352,25 @@ pub async fn find_best_strategy(
 
 /// Collect candidate strategies from the database for smart prediction.
 ///
+/// Uses confidence-aware queries — stale or frequently-failing strategies
+/// are automatically skipped (confidence < MIN_CONFIDENCE).
+///
 /// Priority order:
-/// 1. Exact domain match (e.g. facebook.com already tested)
-/// 2. Best strategy from any other domain (same ISP assumption)
+/// 1. Exact domain match (e.g. facebook.com already tested), if confident
+/// 2. Best strategy from any other domain (same ISP assumption), if confident
 fn collect_candidate_strategies(engine: &AdaptEngine, domain: &str) -> Vec<(String, Strategy)> {
     let mut candidates = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
-    // Try exact domain match first.
-    if let Ok(Some(record)) = engine.store.get_best_strategy(domain) {
+    // Try exact domain match first (with confidence check).
+    if let Ok(Some(record)) = engine.store.get_confident_strategy(domain, MIN_CONFIDENCE) {
+        let confidence = engine.store.get_confidence(domain).unwrap_or(0.0);
+        debug!(
+            %domain,
+            strategy = %record.name,
+            confidence = format!("{:.0}%", confidence * 100.0),
+            "found cached strategy with sufficient confidence"
+        );
         seen_names.insert(record.name.clone());
         candidates.push((
             format!("exact:{}", domain),
@@ -333,9 +381,15 @@ fn collect_candidate_strategies(engine: &AdaptEngine, domain: &str) -> Vec<(Stri
         ));
     }
 
-    // Try best strategy from any domain (cross-domain prediction).
-    if let Ok(Some(record)) = engine.store.get_any_best_strategy() {
+    // Try best strategy from any domain (cross-domain prediction, with confidence).
+    if let Ok(Some((record, confidence))) = engine.store.get_any_confident_strategy(MIN_CONFIDENCE)
+    {
         if !seen_names.contains(&record.name) {
+            debug!(
+                strategy = %record.name,
+                confidence = format!("{:.0}%", confidence * 100.0),
+                "found cross-domain strategy with sufficient confidence"
+            );
             candidates.push((
                 format!("cross-domain:{}", record.name),
                 Strategy {

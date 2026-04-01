@@ -52,6 +52,17 @@ impl Store {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(schema::MIGRATIONS)?;
+
+        // Apply additive V2 migrations (new columns).
+        // ALTER TABLE ... ADD COLUMN fails if column exists — we just ignore errors.
+        for line in schema::MIGRATIONS_V2.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+            let _ = conn.execute_batch(trimmed);
+        }
+
         Ok(())
     }
 

@@ -29,7 +29,13 @@ CREATE TABLE IF NOT EXISTS domain_strategies (
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),
     score       REAL NOT NULL DEFAULT 0.0,
     last_tested TEXT,
-    last_success TEXT
+    last_success TEXT,
+    -- Confidence tracking.
+    -- confidence: 0.0..1.0 — how likely the strategy still works.
+    -- success_count/fail_count: rolling counters for success rate.
+    confidence  REAL NOT NULL DEFAULT 1.0,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    fail_count    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS providers (
@@ -59,4 +65,13 @@ CREATE TABLE IF NOT EXISTS hostlist_entries (
     domain      TEXT NOT NULL,
     PRIMARY KEY (hostlist_id, domain)
 );
+"#;
+
+/// Additive migrations for existing databases.
+/// Each statement uses IF NOT EXISTS or is idempotent.
+pub const MIGRATIONS_V2: &str = r#"
+-- Add confidence columns to domain_strategies (idempotent: ignores if exists).
+ALTER TABLE domain_strategies ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE domain_strategies ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE domain_strategies ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;
 "#;
