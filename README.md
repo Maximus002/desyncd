@@ -29,7 +29,7 @@ Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 
 - **7 bypass techniques**: TCP split, TLS record fragmentation, fake packet injection, disorder, SNI manipulation, HTTP Host tricks, and technique chaining
 - **Auto-adaptation**: automatically probes and discovers the best strategy per domain
-- **Secure DNS**: automatic DNS poisoning bypass via Cloudflare (1.1.1.1) and Google (8.8.8.8) — no more blocked domains due to fake DNS responses
+- **Secure DNS**: automatic DNS poisoning bypass via DNS-over-TLS to Cloudflare (1.1.1.1) and Google (8.8.8.8) — encrypted queries that ISPs cannot intercept or tamper with
 - **Smart prediction**: reuses proven strategies across domains — new domains often bypass in <200ms
 - **Two-phase cold start**: instant internet access with safe defaults while adaptation runs in background
 - **Batch domains**: `--preset russia|china|iran`, `--domains-file`, multi-domain `--domain`
@@ -177,12 +177,14 @@ The engine: baseline test → smart prediction (reuse known strategies) → swee
 
 ## Secure DNS
 
-Many ISPs block websites not only via DPI but also through **DNS poisoning** — returning fake IP addresses for blocked domains. desyncd automatically bypasses this by resolving domains through public DNS servers (Cloudflare 1.1.1.1, Google 8.8.8.8) via direct UDP queries.
+Many ISPs block websites not only via DPI but also through **DNS poisoning** — returning fake IP addresses for blocked domains. Some ISPs go further and intercept all UDP traffic on port 53, tampering with queries even to public DNS servers like 8.8.8.8.
+
+desyncd solves this with **DNS-over-TLS** (DoT, RFC 7858) — sending encrypted DNS queries to Cloudflare and Google on port 853. The ISP cannot inspect or modify encrypted TLS traffic.
 
 - **Enabled by default** — no configuration needed
-- **Zero dependencies** — custom DNS wire format implementation, no external DNS libraries
-- **Automatic fallback** — if public DNS fails, falls back to system DNS
-- **Poisoning detection** — logs a warning when system DNS and public DNS return different IPs
+- **DNS-over-TLS** — encrypted queries on port 853, immune to ISP interception
+- **Automatic fallback** — DoT → plain UDP/53 → system DNS
+- **Poisoning detection** — logs a warning when system DNS and secure DNS return different IPs
 
 To disable (e.g., on a corporate network with internal DNS):
 ```toml
@@ -299,7 +301,7 @@ cargo build --release
 
 - **7 техник обхода**: TCP split, фрагментация TLS record, инъекция фейковых пакетов, disorder, манипуляция SNI, трюки с HTTP Host, цепочки техник
 - **Автоадаптация**: автоматически тестирует и находит лучшую стратегию для каждого домена
-- **Безопасный DNS**: автоматический обход DNS-отравления через Cloudflare (1.1.1.1) и Google (8.8.8.8) — заблокированные домены больше не «исчезают» из-за поддельных DNS-ответов
+- **Безопасный DNS**: автоматический обход DNS-отравления через DNS-over-TLS к Cloudflare (1.1.1.1) и Google (8.8.8.8) — зашифрованные запросы, которые провайдер не может перехватить или подменить
 - **Умное предсказание**: переиспользует найденные стратегии для новых доменов — часто обход за <200мс
 - **Двухфазный холодный старт**: мгновенный доступ в интернет с безопасными дефолтами, пока идёт адаптация
 - **Пакетная обработка**: `--preset russia|china|iran`, `--domains-file`, множественные `--domain`
@@ -446,12 +448,14 @@ desyncd run
 
 ## Безопасный DNS
 
-Многие провайдеры блокируют сайты не только через DPI, но и через **DNS-отравление** — возвращают поддельные IP-адреса для заблокированных доменов. desyncd автоматически обходит это, резолвя домены через публичные DNS-серверы (Cloudflare 1.1.1.1, Google 8.8.8.8) прямыми UDP-запросами.
+Многие провайдеры блокируют сайты не только через DPI, но и через **DNS-отравление** — возвращают поддельные IP-адреса для заблокированных доменов. Некоторые провайдеры идут дальше и перехватывают весь UDP-трафик на порту 53, подменяя ответы даже при запросах к публичным DNS (8.8.8.8).
+
+desyncd решает это через **DNS-over-TLS** (DoT, RFC 7858) — отправляя зашифрованные DNS-запросы к Cloudflare и Google на порт 853. Провайдер не может просмотреть или модифицировать зашифрованный TLS-трафик.
 
 - **Включён по умолчанию** — настройка не нужна
-- **Без зависимостей** — собственная реализация DNS wire format, без внешних DNS-библиотек
-- **Автоматический fallback** — если публичный DNS не отвечает, используется системный
-- **Обнаружение отравления** — логирует предупреждение, когда системный и публичный DNS возвращают разные IP
+- **DNS-over-TLS** — зашифрованные запросы на порту 853, неуязвимы для перехвата
+- **Автоматический fallback** — DoT → UDP/53 → системный DNS
+- **Обнаружение отравления** — логирует предупреждение, когда системный и безопасный DNS возвращают разные IP
 
 Чтобы отключить (например, в корпоративной сети с внутренним DNS):
 ```toml

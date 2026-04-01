@@ -22,3 +22,6 @@ bytes = "1"
 async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 fastrand = "2"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
