@@ -19,7 +19,7 @@ use desyncd_strategy::Selector;
 use desyncd_types::{DesyncAction, StealthConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 /// Maximum buffer size for first-packet reassembly (64KB).
 /// A typical ClientHello is 200-600 bytes; Firefox/Chrome can be ~700 bytes
@@ -66,6 +66,37 @@ pub async fn relay_with_desync(
     // Create payload context and apply strategy.
     let ctx = PayloadContext::new(first_buf.clone());
     let action = selector.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
+
+    // Log the desync action at INFO level so users can diagnose.
+    match &action {
+        DesyncAction::PassThrough => {
+            debug!(?domain, "desync: passthrough (no technique applied)");
+        }
+        DesyncAction::Replace(data) => {
+            info!(
+                ?domain,
+                original_len = first_buf.len(),
+                new_len = data.len(),
+                "desync: payload replaced (e.g. tls_record_frag)"
+            );
+        }
+        DesyncAction::Split(chunks) => {
+            let sizes: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+            info!(
+                ?domain,
+                num_chunks = chunks.len(),
+                ?sizes,
+                "desync: payload split (e.g. tcp_split)"
+            );
+        }
+        DesyncAction::InjectBefore(fakes) => {
+            info!(
+                ?domain,
+                num_fakes = fakes.len(),
+                "desync: injecting fake packets before real data"
+            );
+        }
+    }
 
     crate::action::execute_action(&action, &first_buf, &mut upstream, stealth).await?;
 

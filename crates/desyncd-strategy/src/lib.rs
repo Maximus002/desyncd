@@ -8,7 +8,7 @@ use desyncd_desync::technique::TechniqueConfig;
 use desyncd_desync::PayloadContext;
 use desyncd_types::{AppProtocol, DesyncAction, Result};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 
 /// A named strategy consisting of ordered techniques.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +106,16 @@ impl Selector {
 
         match strategy {
             Some(s) => {
-                debug!(strategy = %s.name, domain = ?domain, "applying strategy");
+                info!(
+                    strategy = %s.name,
+                    domain = ?domain,
+                    techniques = %s.techniques.iter()
+                        .filter(|t| t.enabled)
+                        .map(|t| t.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("+"),
+                    "applying desync strategy"
+                );
                 s.apply(ctx)
             }
             None => {
