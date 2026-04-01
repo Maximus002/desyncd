@@ -80,7 +80,7 @@ struct ProbeResultInfo {
 
 #[tauri::command]
 fn get_status(state: tauri::State<'_, AppState>) -> ProxyStatus {
-    state.status.lock().unwrap().clone()
+    state.status.lock().expect("state lock poisoned").clone()
 }
 
 #[tauri::command]
@@ -89,7 +89,7 @@ async fn start_proxy(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let already_running = state.status.lock().unwrap().running;
+    let already_running = state.status.lock().expect("state lock poisoned").running;
     if already_running {
         return Err("Proxy is already running".into());
     }
@@ -120,17 +120,17 @@ async fn start_proxy(
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    *state.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
+    *state.shutdown_tx.lock().expect("state lock poisoned") = Some(shutdown_tx);
 
     {
-        let mut status = state.status.lock().unwrap();
+        let mut status = state.status.lock().expect("state lock poisoned");
         status.running = true;
         status.mode = mode.clone();
         status.listen = listen.to_string();
     }
 
     // Emit status update to frontend.
-    let _ = app.emit("proxy-status", &*state.status.lock().unwrap());
+    let _ = app.emit("proxy-status", &*state.status.lock().expect("state lock poisoned"));
 
     // Spawn proxy task.
     let app_handle = app.clone();
@@ -151,10 +151,10 @@ async fn start_proxy(
         // Update status on stop.
         let state = app_handle.state::<AppState>();
         {
-            let mut status = state.status.lock().unwrap();
+            let mut status = state.status.lock().expect("state lock poisoned");
             status.running = false;
         }
-        let _ = app_handle.emit("proxy-status", &*state.status.lock().unwrap());
+        let _ = app_handle.emit("proxy-status", &*state.status.lock().expect("state lock poisoned"));
     });
 
     Ok(())
@@ -162,16 +162,16 @@ async fn start_proxy(
 
 #[tauri::command]
 fn stop_proxy(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let running = state.status.lock().unwrap().running;
+    let running = state.status.lock().expect("state lock poisoned").running;
     if !running {
         return Err("Proxy is not running".into());
     }
 
-    if let Some(tx) = state.shutdown_tx.lock().unwrap().take() {
+    if let Some(tx) = state.shutdown_tx.lock().expect("state lock poisoned").take() {
         let _ = tx.send(());
     }
 
-    let mut status = state.status.lock().unwrap();
+    let mut status = state.status.lock().expect("state lock poisoned");
     status.running = false;
 
     Ok(())

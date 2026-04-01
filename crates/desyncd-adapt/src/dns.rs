@@ -303,6 +303,9 @@ fn skip_dns_name(data: &[u8], mut pos: usize) -> anyhow::Result<usize> {
         }
 
         // Regular label.
+        if pos + 1 + len > data.len() {
+            anyhow::bail!("DNS label extends past end of packet");
+        }
         pos += 1 + len;
     }
 

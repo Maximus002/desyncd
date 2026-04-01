@@ -73,6 +73,8 @@ pub enum Command {
     },
     /// Print effective configuration.
     ShowConfig,
+    /// Launch the GUI application.
+    Gui,
 }
 
 /// Configuration file structure.

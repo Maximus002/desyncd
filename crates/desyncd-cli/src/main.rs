@@ -82,6 +82,9 @@ async fn main() -> anyhow::Result<()> {
             show_config(&config);
             Ok(())
         }
+        Command::Gui => {
+            launch_gui()
+        }
     }
 }
 
@@ -613,6 +616,58 @@ fn get_preset_domains(preset: &str) -> anyhow::Result<Vec<String>> {
         ),
     };
     Ok(domains.into_iter().map(String::from).collect())
+}
+
+/// Launch the GUI application.
+fn launch_gui() -> anyhow::Result<()> {
+    // Try to find the GUI binary next to the current executable, or in PATH.
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let exe_dir = current_exe.parent().unwrap_or(std::path::Path::new("."));
+
+    // Candidates: same directory as CLI, then macOS app bundle, then PATH.
+    let candidates = [
+        exe_dir.join("desyncd-gui"),
+        exe_dir.join("bundle/macos/desyncd.app/Contents/MacOS/desyncd-gui"),
+        PathBuf::from("desyncd-gui"),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() || candidate.components().count() == 1 {
+            info!(path = %candidate.display(), "launching GUI");
+            let status = std::process::Command::new(candidate)
+                .spawn();
+            match status {
+                Ok(_child) => {
+                    println!("GUI launched.");
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    // Try opening the .app bundle on macOS.
+    #[cfg(target_os = "macos")]
+    {
+        let app_path = exe_dir.join("bundle/macos/desyncd.app");
+        if app_path.exists() {
+            let status = std::process::Command::new("open")
+                .arg(&app_path)
+                .spawn();
+            if let Ok(_) = status {
+                println!("GUI launched via macOS open.");
+                return Ok(());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "GUI binary not found. Build it first:\n  \
+         cargo tauri build\n  \
+         # or\n  \
+         cd crates/desyncd-gui && cargo tauri dev"
+    )
 }
 
 /// Expand `~` in a path to the user's home directory.

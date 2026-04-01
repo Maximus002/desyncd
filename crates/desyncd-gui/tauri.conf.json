@@ -1,13 +1,13 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicegui/nicegui/main/tauri.conf.schema.json",
+  "$schema": "gen/schemas/desktop-schema.json",
   "productName": "desyncd",
   "version": "0.1.0",
-  "identifier": "com.desyncd.app",
+  "identifier": "com.desyncd.tool",
   "build": {
     "frontendDist": "frontend/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd frontend && npm run dev",
-    "beforeBuildCommand": "cd frontend && npm run build"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,
