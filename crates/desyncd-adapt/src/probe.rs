@@ -89,28 +89,7 @@ async fn probe_inner(
     if let Some(strategy) = strategy {
         let ctx = PayloadContext::new(client_hello.clone());
         let action = strategy.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
-
-        match action {
-            DesyncAction::PassThrough => {
-                stream.write_all(&client_hello).await?;
-            }
-            DesyncAction::Replace(data) => {
-                stream.write_all(&data).await?;
-            }
-            DesyncAction::Split(chunks) => {
-                for chunk in &chunks {
-                    stream.write_all(chunk).await?;
-                    stream.flush().await?;
-                }
-            }
-            DesyncAction::InjectBefore(fakes) => {
-                for fake in &fakes {
-                    stream.write_all(fake).await?;
-                    stream.flush().await?;
-                }
-                stream.write_all(&client_hello).await?;
-            }
-        }
+        desyncd_proxy::action::execute_action(&action, &client_hello, &mut stream, None).await?;
     } else {
         // No strategy — baseline test.
         stream.write_all(&client_hello).await?;
@@ -119,8 +98,10 @@ async fn probe_inner(
     stream.flush().await?;
 
     // Wait for a response (ServerHello or RST/FIN).
+    // Use the remaining time from the outer timeout (capped at 10s).
+    let read_timeout = Duration::from_secs(10);
     let mut buf = [0u8; 6]; // TLS record header (5) + handshake type (1).
-    match tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf)).await {
+    match tokio::time::timeout(read_timeout, stream.read_exact(&mut buf)).await {
         Ok(Ok(_)) => {
             // A real ServerHello: content_type=0x16 (Handshake), then
             // after the 5-byte record header, handshake_type=0x02 (ServerHello).

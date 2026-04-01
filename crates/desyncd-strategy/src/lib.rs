@@ -6,7 +6,7 @@
 
 use desyncd_desync::technique::TechniqueConfig;
 use desyncd_desync::PayloadContext;
-use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition};
+use desyncd_types::{AppProtocol, DesyncAction, Result};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -29,12 +29,7 @@ impl Strategy {
                 continue;
             }
 
-            let split_pos = tech
-                .split_position
-                .clone()
-                .unwrap_or(SplitPosition::Sni);
-
-            match desyncd_desync::apply_technique(&tech.name, ctx, &split_pos, tech.stealth.as_ref()) {
+            match desyncd_desync::apply_technique_cfg(tech, ctx) {
                 Ok(action) => {
                     debug!(technique = %tech.name, "strategy applied technique");
                     return Ok(action);
@@ -140,16 +135,21 @@ fn extract_domain(proto: &AppProtocol) -> Option<String> {
 
 /// Simple glob matcher for domain patterns.
 ///
-/// Supports `*` as a wildcard prefix (e.g., `*.example.com` matches
-/// `foo.example.com` and `bar.baz.example.com`).
+/// Supports `*` as a catch-all and `*.example.com` for subdomains.
+/// Per RFC 6125, `*.example.com` matches subdomains only, NOT `example.com` itself.
+/// To match both, use two rules: `example.com` and `*.example.com`.
 fn domain_matches(pattern: &str, domain: &str) -> bool {
     if pattern == "*" {
         return true;
     }
 
     if let Some(suffix) = pattern.strip_prefix("*.") {
-        // Match the suffix itself or any subdomain of it.
-        domain == suffix || domain.ends_with(&format!(".{}", suffix))
+        // Wildcard: match subdomains only (RFC 6125).
+        // e.g. *.youtube.com matches www.youtube.com but NOT youtube.com.
+        // Avoid format!() allocation in hot path.
+        domain.len() > suffix.len()
+            && domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
+            && domain[domain.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     } else {
         // Exact match (case-insensitive).
         pattern.eq_ignore_ascii_case(domain)
@@ -159,12 +159,13 @@ fn domain_matches(pattern: &str, domain: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desyncd_types::SplitPosition;
 
     #[test]
     fn test_domain_matches() {
         assert!(domain_matches("*", "anything.com"));
         assert!(domain_matches("*.youtube.com", "www.youtube.com"));
-        assert!(domain_matches("*.youtube.com", "youtube.com"));
+        assert!(!domain_matches("*.youtube.com", "youtube.com")); // RFC 6125: wildcard != bare domain
         assert!(domain_matches("*.youtube.com", "a.b.youtube.com"));
         assert!(!domain_matches("*.youtube.com", "notyoutube.com"));
         assert!(domain_matches("example.com", "example.com"));

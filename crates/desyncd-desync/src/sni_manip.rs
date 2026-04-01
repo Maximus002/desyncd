@@ -10,8 +10,33 @@
 //! These operate at the application layer and modify the actual payload bytes.
 
 use crate::PayloadContext;
-use desyncd_types::{AppProtocol, DesyncAction, Result};
+use crate::technique::{Technique, TechniqueConfig};
+use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition, StealthConfig};
 use tracing::debug;
+
+/// Technique trait implementation for SNI manipulation.
+pub struct SniManipTechnique;
+
+impl Technique for SniManipTechnique {
+    fn name(&self) -> &'static str {
+        "sni_manip"
+    }
+
+    fn apply(
+        &self,
+        ctx: &PayloadContext,
+        _split_pos: &SplitPosition,
+        config: &TechniqueConfig,
+        _stealth: Option<&StealthConfig>,
+    ) -> Result<DesyncAction> {
+        let mode = config
+            .sni_mode
+            .as_deref()
+            .and_then(SniMode::from_str_opt)
+            .unwrap_or_default();
+        apply(ctx, mode)
+    }
+}
 
 /// SNI manipulation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -24,6 +49,18 @@ pub enum SniMode {
     Remove,
     /// Add padding extension before SNI to shift its position.
     Pad,
+}
+
+impl SniMode {
+    /// Parse a mode from a string (case-insensitive).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "mixed_case" | "mixedcase" | "mixed" => Some(Self::MixedCase),
+            "remove" => Some(Self::Remove),
+            "pad" | "padding" => Some(Self::Pad),
+            _ => None,
+        }
+    }
 }
 
 

@@ -13,6 +13,8 @@ pub mod testutil;
 
 use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition, StealthConfig};
 
+use crate::technique::{TechniqueConfig, TechniqueRegistry};
+
 /// Context for applying desync techniques.
 ///
 /// This is created from the raw application payload (not IP/TCP headers)
@@ -51,7 +53,7 @@ impl PayloadContext {
     pub fn resolve_split_position(&self, pos: &SplitPosition) -> Option<usize> {
         match pos {
             SplitPosition::Absolute(offset) => {
-                if *offset > 0 && *offset < self.payload.len() {
+                if *offset < self.payload.len() {
                     Some(*offset)
                 } else {
                     None
@@ -61,7 +63,7 @@ impl PayloadContext {
             SplitPosition::SniOffset(delta) => {
                 let base = desyncd_packet::default_split_offset(&self.protocol)?;
                 let result = base as i64 + *delta as i64;
-                if result > 0 && (result as usize) < self.payload.len() {
+                if result >= 0 && (result as usize) < self.payload.len() {
                     Some(result as usize)
                 } else {
                     None
@@ -77,35 +79,39 @@ impl PayloadContext {
     }
 }
 
+/// Global default registry (created once per call — cheap since it's just vtable pointers).
+fn default_registry() -> TechniqueRegistry {
+    TechniqueRegistry::default()
+}
+
+/// Apply a technique described by `TechniqueConfig` to the payload context.
+///
+/// Reads `sni_mode`, `host_mode`, `fake_type`, and `stealth` from the config.
+/// Falls back to defaults when the config fields are `None`.
+pub fn apply_technique_cfg(
+    config: &TechniqueConfig,
+    ctx: &PayloadContext,
+) -> Result<DesyncAction> {
+    let split_pos = config
+        .split_position
+        .clone()
+        .unwrap_or(SplitPosition::Sni);
+    let stealth = config.stealth.as_ref();
+
+    default_registry().apply(&config.name, ctx, &split_pos, config, stealth)
+}
+
 /// Apply a named technique to the payload context.
 ///
 /// The optional `stealth` config controls jitter, fake record sizing, etc.
+/// When called with a full `TechniqueConfig`, mode fields (sni_mode, host_mode,
+/// fake_type) are respected; otherwise defaults are used.
 pub fn apply_technique(
     name: &str,
     ctx: &PayloadContext,
     split_pos: &SplitPosition,
     stealth: Option<&StealthConfig>,
+    config: &TechniqueConfig,
 ) -> Result<DesyncAction> {
-    // Resolve split position with optional jitter.
-    let jitter = stealth.map_or(0, |s| s.split_jitter);
-    let effective_pos = if jitter > 0 {
-        ctx.resolve_split_position_with_jitter(split_pos, jitter)
-            .map(SplitPosition::Absolute)
-            .unwrap_or_else(|| split_pos.clone())
-    } else {
-        split_pos.clone()
-    };
-
-    match name {
-        "tcp_split" => tcp_split::apply(ctx, &effective_pos),
-        "tls_record_frag" => tls_record_frag::apply(ctx, &effective_pos),
-        "fake_packet" => fake_packet::apply_socks(ctx, &fake_packet::FakeConfig::default(), stealth),
-        "disorder" => disorder::apply(ctx, &effective_pos),
-        "sni_manip" => sni_manip::apply(ctx, sni_manip::SniMode::default()),
-        "http_host" => http_host::apply(ctx, http_host::HostMode::default()),
-        _ => Err(desyncd_types::Error::NotApplicable(format!(
-            "unknown technique: {}",
-            name
-        ))),
-    }
+    default_registry().apply(name, ctx, split_pos, config, stealth)
 }

@@ -12,8 +12,33 @@
 //! and actual HTTP server parsing.
 
 use crate::PayloadContext;
-use desyncd_types::{AppProtocol, DesyncAction, Result};
+use crate::technique::{Technique, TechniqueConfig};
+use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition, StealthConfig};
 use tracing::debug;
+
+/// Technique trait implementation for HTTP Host manipulation.
+pub struct HttpHostTechnique;
+
+impl Technique for HttpHostTechnique {
+    fn name(&self) -> &'static str {
+        "http_host"
+    }
+
+    fn apply(
+        &self,
+        ctx: &PayloadContext,
+        _split_pos: &SplitPosition,
+        config: &TechniqueConfig,
+        _stealth: Option<&StealthConfig>,
+    ) -> Result<DesyncAction> {
+        let mode = config
+            .host_mode
+            .as_deref()
+            .and_then(HostMode::from_str_opt)
+            .unwrap_or_default();
+        apply(ctx, mode)
+    }
+}
 
 /// HTTP Host manipulation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -30,6 +55,20 @@ pub enum HostMode {
     LineWrapping,
     /// Add a duplicate Host header with garbage value.
     DuplicateHeader,
+}
+
+impl HostMode {
+    /// Parse a mode from a string (case-insensitive).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "mixed_case" | "mixedcase" | "mixed" => Some(Self::MixedCase),
+            "extra_space" | "extraspace" | "space" => Some(Self::ExtraSpace),
+            "tab" => Some(Self::Tab),
+            "line_wrapping" | "linewrapping" | "wrap" => Some(Self::LineWrapping),
+            "duplicate_header" | "duplicateheader" | "duplicate" => Some(Self::DuplicateHeader),
+            _ => None,
+        }
+    }
 }
 
 
@@ -69,13 +108,8 @@ pub fn apply(ctx: &PayloadContext, mode: HostMode) -> Result<DesyncAction> {
 /// Randomize case of the "Host" header name.
 fn apply_mixed_case_header(payload: &str) -> String {
     // Find "Host:" (case-insensitive) and replace with mixed case.
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-
     let variants = ["hOsT", "HOST", "HoSt", "hoST", "HOst", "hosT"];
-    let idx = (seed as usize) % variants.len();
+    let idx = fastrand::usize(..variants.len());
     let replacement = variants[idx];
 
     replace_header_name(payload, "host", replacement)

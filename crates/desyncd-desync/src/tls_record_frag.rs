@@ -14,8 +14,28 @@
 //! Reference: https://upb-syssec.github.io/blog/2023/record-fragmentation/
 
 use crate::PayloadContext;
-use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition};
+use crate::technique::{Technique, TechniqueConfig};
+use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition, StealthConfig};
 use tracing::debug;
+
+/// Technique trait implementation for TLS record fragmentation.
+pub struct TlsRecordFragTechnique;
+
+impl Technique for TlsRecordFragTechnique {
+    fn name(&self) -> &'static str {
+        "tls_record_frag"
+    }
+
+    fn apply(
+        &self,
+        ctx: &PayloadContext,
+        split_pos: &SplitPosition,
+        _config: &TechniqueConfig,
+        _stealth: Option<&StealthConfig>,
+    ) -> Result<DesyncAction> {
+        apply(ctx, split_pos)
+    }
+}
 
 /// TLS ContentType for Handshake messages.
 const CONTENT_TYPE_HANDSHAKE: u8 = 0x16;

@@ -13,6 +13,7 @@
 //! - `PassThrough` → try next technique on original
 
 use crate::PayloadContext;
+use crate::technique::TechniqueConfig;
 use desyncd_types::{DesyncAction, Result, SplitPosition};
 use tracing::debug;
 
@@ -35,7 +36,17 @@ pub fn apply_chain(
     for (i, (name, split_pos)) in techniques.iter().enumerate() {
         let inner_ctx = PayloadContext::new(current_payload.clone());
 
-        let action = match crate::apply_technique(name, &inner_ctx, split_pos, None) {
+        let config = TechniqueConfig {
+            name: name.to_string(),
+            split_position: Some(split_pos.clone()),
+            enabled: true,
+            fake_type: None,
+            sni_mode: None,
+            host_mode: None,
+            stealth: None,
+        };
+
+        let action = match crate::apply_technique(name, &inner_ctx, split_pos, None, &config) {
             Ok(a) => a,
             Err(desyncd_types::Error::NotApplicable(_)) => {
                 debug!(technique = name, step = i, "combo: technique not applicable, skipping");

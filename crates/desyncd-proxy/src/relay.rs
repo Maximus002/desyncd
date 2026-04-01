@@ -21,16 +21,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, trace};
 
-/// Apply random timing jitter between segments if configured.
-async fn maybe_timing_jitter(stealth: Option<&StealthConfig>) {
-    if let Some(jitter_us) = stealth.and_then(|s| {
-        if s.timing_jitter_us > 0 { Some(s.timing_jitter_us) } else { None }
-    }) {
-        let delay = fastrand::u32(0..=jitter_us);
-        tokio::time::sleep(Duration::from_micros(delay as u64)).await;
-    }
-}
-
 /// Maximum buffer size for first-packet reassembly (64KB).
 /// A typical ClientHello is 200-600 bytes; Firefox/Chrome can be ~700 bytes
 /// with many extensions. 64KB covers even pathological cases.
@@ -77,42 +67,7 @@ pub async fn relay_with_desync(
     let ctx = PayloadContext::new(first_buf.clone());
     let action = selector.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
 
-    match action {
-        DesyncAction::PassThrough => {
-            debug!("no desync applied, passing through");
-            upstream.write_all(&first_buf).await?;
-        }
-        DesyncAction::Replace(new_data) => {
-            debug!(
-                original_len = first_buf.len(),
-                new_len = new_data.len(),
-                "desync: replacing payload"
-            );
-            upstream.write_all(&new_data).await?;
-        }
-        DesyncAction::Split(chunks) => {
-            debug!(num_chunks = chunks.len(), "desync: splitting into segments");
-            for (i, chunk) in chunks.iter().enumerate() {
-                trace!(chunk_idx = i, len = chunk.len(), "sending chunk");
-                upstream.write_all(chunk).await?;
-                upstream.flush().await?;
-                maybe_timing_jitter(stealth).await;
-            }
-        }
-        DesyncAction::InjectBefore(fake_chunks) => {
-            debug!(
-                num_fakes = fake_chunks.len(),
-                "desync: injecting fake data before real payload"
-            );
-            for (i, chunk) in fake_chunks.iter().enumerate() {
-                trace!(chunk_idx = i, len = chunk.len(), "sending fake chunk");
-                upstream.write_all(chunk).await?;
-                upstream.flush().await?;
-            }
-            maybe_timing_jitter(stealth).await;
-            upstream.write_all(&first_buf).await?;
-        }
-    }
+    crate::action::execute_action(&action, &first_buf, &mut upstream, stealth).await?;
 
     // --- Bidirectional relay for remaining data ---
     let (mut client_reader, mut client_writer) = client.into_split();

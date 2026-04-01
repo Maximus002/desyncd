@@ -19,8 +19,32 @@
 //! first TLS record and get confused by the fake data.
 
 use crate::PayloadContext;
-use desyncd_types::{AppProtocol, DesyncAction, FakeType, Result, StealthConfig};
+use crate::technique::{Technique, TechniqueConfig};
+use desyncd_types::{AppProtocol, DesyncAction, FakeType, Result, SplitPosition, StealthConfig};
 use tracing::debug;
+
+/// Technique trait implementation for fake packet injection.
+pub struct FakePacketTechnique;
+
+impl Technique for FakePacketTechnique {
+    fn name(&self) -> &'static str {
+        "fake_packet"
+    }
+
+    fn apply(
+        &self,
+        ctx: &PayloadContext,
+        _split_pos: &SplitPosition,
+        config: &TechniqueConfig,
+        stealth: Option<&StealthConfig>,
+    ) -> Result<DesyncAction> {
+        let mut fake_config = FakeConfig::default();
+        if let Some(ref ft) = config.fake_type {
+            fake_config.fake_type = ft.clone();
+        }
+        apply_socks(ctx, &fake_config, stealth)
+    }
+}
 
 /// Configuration for fake packet injection.
 #[derive(Debug, Clone)]

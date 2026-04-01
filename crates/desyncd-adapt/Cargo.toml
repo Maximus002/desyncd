@@ -9,6 +9,7 @@ desyncd-types = { path = "../desyncd-types" }
 desyncd-desync = { path = "../desyncd-desync" }
 desyncd-store = { path = "../desyncd-store" }
 desyncd-strategy = { path = "../desyncd-strategy" }
+desyncd-proxy = { path = "../desyncd-proxy" }
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true

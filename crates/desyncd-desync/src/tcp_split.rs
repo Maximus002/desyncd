@@ -10,8 +10,28 @@
 //! the TCP stream normally.
 
 use crate::PayloadContext;
-use desyncd_types::{DesyncAction, Result, SplitPosition};
+use crate::technique::{Technique, TechniqueConfig};
+use desyncd_types::{DesyncAction, Result, SplitPosition, StealthConfig};
 use tracing::debug;
+
+/// Technique trait implementation for TCP split.
+pub struct TcpSplitTechnique;
+
+impl Technique for TcpSplitTechnique {
+    fn name(&self) -> &'static str {
+        "tcp_split"
+    }
+
+    fn apply(
+        &self,
+        ctx: &PayloadContext,
+        split_pos: &SplitPosition,
+        _config: &TechniqueConfig,
+        _stealth: Option<&StealthConfig>,
+    ) -> Result<DesyncAction> {
+        apply(ctx, split_pos)
+    }
+}
 
 /// Apply TCP split to the given payload context.
 ///
@@ -23,7 +43,7 @@ pub fn apply(ctx: &PayloadContext, split_pos: &SplitPosition) -> Result<DesyncAc
         )
     })?;
 
-    if offset == 0 || offset >= ctx.payload.len() {
+    if offset >= ctx.payload.len() {
         return Ok(DesyncAction::PassThrough);
     }
 

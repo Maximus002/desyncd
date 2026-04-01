@@ -239,6 +239,50 @@ pub async fn find_best_strategy(
         });
     }
 
+    // Step 4: Confirmation probes — verify the best strategy works reliably.
+    if let Some(ref strategy) = best_strategy {
+        let confirm_count = 2;
+        let mut confirm_successes = 0;
+
+        for i in 0..confirm_count {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let result = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+            let label = format!("confirm_{}", i + 1);
+            all_probes.push((label, result.clone()));
+
+            if result.success {
+                confirm_successes += 1;
+            }
+        }
+
+        if confirm_successes < confirm_count {
+            debug!(
+                %domain,
+                strategy = %strategy.name,
+                successes = confirm_successes,
+                total = confirm_count,
+                "confirmation failed — strategy may be unreliable"
+            );
+            // Reduce score proportionally to failure rate.
+            best_score *= confirm_successes as f64 / confirm_count as f64;
+
+            // If all confirmations failed, discard the strategy.
+            if confirm_successes == 0 {
+                info!(%domain, "strategy failed all confirmation probes, discarding");
+                best_strategy = None;
+                best_score = 0.0;
+            }
+        } else {
+            debug!(
+                %domain,
+                strategy = %strategy.name,
+                "strategy confirmed reliable ({}/{})",
+                confirm_successes,
+                confirm_count,
+            );
+        }
+    }
+
     // Save the best strategy to the store.
     if let Some(ref strategy) = best_strategy {
         if let Ok(sid) = engine
@@ -253,7 +297,7 @@ pub async fn find_best_strategy(
             %domain,
             strategy = %strategy.name,
             score = best_score,
-            "best strategy found"
+            "best strategy found and confirmed"
         );
     } else {
         info!(%domain, "no working strategy found");
