@@ -91,18 +91,19 @@ async fn run(config: AppConfig) -> anyhow::Result<()> {
     // adaptation optimizes. tls_record_frag creates valid TLS records
     // (RFC 5246) so it's harmless for non-blocked sites.
     let (strategies, rules) = if config.strategies.is_empty() {
-        info!("no strategies configured, applying safe defaults (tcp_split + tls_record_frag)");
-        // Two complementary strategies:
-        // - tcp_split: splits at TCP layer — defeats DPI that reassembles TLS records
-        // - tls_record_frag: fragments at TLS layer — defeats DPI that inspects first TCP segment
-        // The selector tries each technique in order; first applicable wins.
+        info!("no strategies configured, using tls_record_frag as safe default");
+        // tls_record_frag is the safest cold-start default:
+        // - RFC 5246 compliant (servers MUST reassemble fragmented TLS records)
+        // - Harmless for non-blocked sites
+        // - Defeats most DPI that can't reassemble TLS records (ТСПУ, etc.)
+        // - tcp_split doesn't work on ISPs that reassemble TCP segments before DPI
+        //
+        // Run `desyncd adapt --save` to discover the optimal technique for your ISP.
         let default_strategy = desyncd_strategy::Strategy {
             name: "auto_default".into(),
             techniques: vec![
-                // tcp_split is tried first — works against more DPI implementations
-                // because the DPI sees incomplete TCP data and can't parse TLS at all.
                 desyncd_desync::technique::TechniqueConfig {
-                    name: "tcp_split".into(),
+                    name: "tls_record_frag".into(),
                     split_position: Some(desyncd_types::SplitPosition::SniOffset(-1)),
                     enabled: true,
                     fake_type: None,
@@ -454,26 +455,22 @@ fn generate_config(
         priority += 1;
     }
 
-    // Default catch-all strategy: tcp_split is the most broadly effective
-    // technique because it operates at the TCP layer — DPI can't parse TLS
-    // from incomplete TCP segments. This handles CDN domains (e.g. *.fbcdn.net)
-    // and new sites that aren't in the per-domain rules.
-    // It's harmless for non-blocked sites (TCP reassembly is transparent).
-    strategies.insert(
-        "tcp_split_default".into(),
-        desyncd_config::StrategyDef {
-            techniques: vec![desyncd_desync::technique::TechniqueConfig {
-                name: "tcp_split".into(),
-                split_position: Some(desyncd_types::SplitPosition::SniOffset(-1)),
-                enabled: true,
-                fake_type: None,
-                sni_mode: None,
-                host_mode: None,
-                stealth: None,
-            }],
-        },
-    );
-    let default_strategy_name = "tcp_split_default".to_string();
+    // Default catch-all: use the first discovered strategy (which was
+    // found by adapt to actually work on this ISP) for all unmatched domains.
+    // This covers CDN domains (e.g. *.fbcdn.net for facebook.com, *.twimg.com
+    // for twitter.com) that share the same DPI rules.
+    let default_strategy_name = if let Some((domain, _)) = discovered.first() {
+        domain.replace('.', "_").replace('*', "wildcard")
+    } else {
+        // No discovered strategies — use passthrough.
+        strategies.insert(
+            "passthrough".into(),
+            desyncd_config::StrategyDef {
+                techniques: vec![],
+            },
+        );
+        "passthrough".into()
+    };
 
     rules.push(desyncd_strategy::MatchRule {
         domains: vec!["*".into()],
