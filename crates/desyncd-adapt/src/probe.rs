@@ -81,6 +81,8 @@ async fn probe_inner(
 ) -> anyhow::Result<bool> {
     let addr = format!("{}:{}", domain, port);
     let mut stream = TcpStream::connect(&addr).await?;
+    let peer = stream.peer_addr().ok();
+    debug!(%domain, ?peer, "probe connected");
     stream.set_nodelay(true)?;
 
     // Build a minimal TLS ClientHello.
@@ -205,7 +207,22 @@ fn build_probe_client_hello(domain: &str) -> Vec<u8> {
         extensions.extend_from_slice(&0x0303u16.to_be_bytes()); // TLS 1.2
     }
 
-    // 6. Key share (0x0033) — x25519 with dummy public key (probe only).
+    // 6. ALPN extension (0x0010) — required by many modern servers.
+    {
+        // Advertise h2 and http/1.1.
+        let protocols: &[&[u8]] = &[b"h2", b"http/1.1"];
+        let mut alpn_data = Vec::new();
+        for proto in protocols {
+            alpn_data.push(proto.len() as u8);
+            alpn_data.extend_from_slice(proto);
+        }
+        extensions.extend_from_slice(&0x0010u16.to_be_bytes());
+        extensions.extend_from_slice(&((alpn_data.len() + 2) as u16).to_be_bytes());
+        extensions.extend_from_slice(&(alpn_data.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&alpn_data);
+    }
+
+    // 7. Key share (0x0033) — x25519 with dummy public key (probe only).
     {
         let mut x25519_key = [0u8; 32];
         for b in &mut x25519_key {
