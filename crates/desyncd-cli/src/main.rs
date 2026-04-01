@@ -141,6 +141,7 @@ async fn run(config: AppConfig) -> anyhow::Result<()> {
                         enabled: config.adaptation.enabled,
                         test_interval_secs: config.adaptation.test_interval_secs,
                         test_domains: config.adaptation.test_domains.clone(),
+                        secure_dns: config.adaptation.secure_dns,
                         ..Default::default()
                     };
                     let engine = Arc::new(desyncd_adapt::AdaptEngine::new(store, adapt_config));
@@ -209,11 +210,12 @@ async fn test_domains(
             println!("{}", "-".repeat(60));
 
             // Baseline.
-            let baseline = desyncd_adapt::probe::probe_domain(
+            let baseline = desyncd_adapt::probe::probe_domain_ex(
                 domain,
                 443,
                 None,
                 std::time::Duration::from_secs(10),
+                true, // secure DNS
             )
             .await;
             println!(
@@ -239,11 +241,12 @@ async fn test_domains(
                     }],
                 };
 
-                let result = desyncd_adapt::probe::probe_domain(
+                let result = desyncd_adapt::probe::probe_domain_ex(
                     domain,
                     443,
                     Some(&strategy),
                     std::time::Duration::from_secs(10),
+                    true, // secure DNS
                 )
                 .await;
 
@@ -301,6 +304,7 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
     let adapt_config = desyncd_adapt::AdaptConfig {
         enabled: true,
         test_domains: domains.clone(),
+        secure_dns: config.adaptation.secure_dns,
         ..Default::default()
     };
 
@@ -492,6 +496,7 @@ fn generate_config(
             test_interval_secs: base_config.adaptation.test_interval_secs,
             test_domains: discovered.iter().map(|(d, _)| d.clone()).collect(),
             db_path: base_config.db_path.clone(),
+            secure_dns: base_config.adaptation.secure_dns,
         },
         stealth: base_config.stealth.clone(),
         strategies,
@@ -537,6 +542,7 @@ fn show_config(config: &AppConfig) {
         "    test_domains: {:?}",
         config.adaptation.test_domains
     );
+    println!("    secure_dns: {}", config.adaptation.secure_dns);
     println!();
     println!("  stealth:");
     println!("    split_jitter: {}", config.stealth.split_jitter);

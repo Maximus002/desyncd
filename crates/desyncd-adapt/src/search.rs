@@ -48,6 +48,7 @@ pub async fn find_best_strategy(
 ) -> anyhow::Result<SearchResult> {
     let timeout = engine.config.probe_timeout();
     let port = 443u16;
+    let secure_dns = engine.config.secure_dns;
     let mut all_probes: Vec<(String, ProbeResult)> = Vec::new();
 
     info!(%domain, "starting strategy search");
@@ -65,7 +66,7 @@ pub async fn find_best_strategy(
 
         for (label, strategy) in &candidates {
             // First probe — quick check.
-            let result = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+            let result = probe::probe_domain_ex(domain, port, Some(strategy), timeout, secure_dns).await;
             let score = compute_score(&result);
             all_probes.push((format!("guess:{}", label), result.clone()));
 
@@ -81,7 +82,7 @@ pub async fn find_best_strategy(
             let mut confirm_ok = 0usize;
             for i in 0..FAST_GUESS_CONFIRMS {
                 tokio::time::sleep(Duration::from_millis(300)).await;
-                let confirm = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+                let confirm = probe::probe_domain_ex(domain, port, Some(strategy), timeout, secure_dns).await;
                 all_probes.push((format!("guess_confirm:{}:{}", label, i + 1), confirm.clone()));
                 if confirm.success {
                     confirm_ok += 1;
@@ -132,7 +133,7 @@ pub async fn find_best_strategy(
     }
 
     // Step 1: Baseline test.
-    let baseline = probe::probe_domain(domain, port, None, timeout).await;
+    let baseline = probe::probe_domain_ex(domain, port, None, timeout, secure_dns).await;
     all_probes.push(("baseline".into(), baseline.clone()));
 
     if baseline.success {
@@ -183,7 +184,7 @@ pub async fn find_best_strategy(
             }],
         };
 
-        let result = probe::probe_domain(domain, port, Some(&strategy), timeout).await;
+        let result = probe::probe_domain_ex(domain, port, Some(&strategy), timeout, secure_dns).await;
         let score = compute_score(&result);
 
         let _ = engine.store.save_test_result(
@@ -240,7 +241,7 @@ pub async fn find_best_strategy(
                 }],
             };
 
-            let result = probe::probe_domain(domain, port, Some(&strategy), timeout).await;
+            let result = probe::probe_domain_ex(domain, port, Some(&strategy), timeout, secure_dns).await;
             let score = compute_score(&result);
             let label = format!("{}+{:?}", tech_name, split_pos);
             all_probes.push((label, result.clone()));
@@ -284,7 +285,7 @@ pub async fn find_best_strategy(
 
         for i in 0..confirm_count {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let result = probe::probe_domain(domain, port, Some(strategy), timeout).await;
+            let result = probe::probe_domain_ex(domain, port, Some(strategy), timeout, secure_dns).await;
             let label = format!("confirm_{}", i + 1);
             all_probes.push((label, result.clone()));
 

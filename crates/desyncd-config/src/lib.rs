@@ -111,6 +111,11 @@ pub struct AdaptationConfig {
 
     #[serde(default = "default_db_path")]
     pub db_path: String,
+
+    /// Use public DNS (Cloudflare/Google) instead of system DNS
+    /// for probe resolution. Bypasses ISP DNS poisoning.
+    #[serde(default = "default_true")]
+    pub secure_dns: bool,
 }
 
 impl Default for AdaptationConfig {
@@ -120,6 +125,7 @@ impl Default for AdaptationConfig {
             test_interval_secs: default_test_interval(),
             test_domains: Vec::new(),
             db_path: default_db_path(),
+            secure_dns: true,
         }
     }
 }

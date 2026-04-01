@@ -29,6 +29,7 @@ Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 
 - **7 bypass techniques**: TCP split, TLS record fragmentation, fake packet injection, disorder, SNI manipulation, HTTP Host tricks, and technique chaining
 - **Auto-adaptation**: automatically probes and discovers the best strategy per domain
+- **Secure DNS**: automatic DNS poisoning bypass via Cloudflare (1.1.1.1) and Google (8.8.8.8) — no more blocked domains due to fake DNS responses
 - **Smart prediction**: reuses proven strategies across domains — new domains often bypass in <200ms
 - **Two-phase cold start**: instant internet access with safe defaults while adaptation runs in background
 - **Batch domains**: `--preset russia|china|iran`, `--domains-file`, multi-domain `--domain`
@@ -40,6 +41,7 @@ Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 - **Per-domain rules**: different strategies for different sites, with RFC 6125 wildcard support
 - **Pluggable architecture**: add a new bypass technique by implementing a single trait — the engine, CLI, and probe pick it up automatically
 - **GUI**: Tauri + Svelte desktop app (Windows, macOS, Linux)
+- **Confidence decay**: strategies auto-degrade over time; unreliable ones are automatically re-tested
 - **QUIC awareness**: detects QUIC Initial packets for future UDP desync support
 
 ## Quick Start
@@ -106,6 +108,7 @@ listen = "127.0.0.1:1080"
 enabled = true
 test_interval_secs = 21600  # 6 hours
 test_domains = ["youtube.com", "rutracker.org"]
+secure_dns = true  # bypass DNS poisoning via Cloudflare/Google (default: true)
 
 [stealth]
 split_jitter = 4
@@ -170,6 +173,23 @@ The engine: baseline test → smart prediction (reuse known strategies) → swee
 
 **Smart prediction:** When a working strategy is found for one domain, it's automatically tried for new domains first. Since ISPs typically use the same DPI rules, this often works — reducing discovery time from ~60s to <200ms.
 
+**Confidence decay:** Strategies have a confidence score that decays over time (7-day half-life). Strategies that fail frequently are automatically demoted and re-tested, ensuring the tool adapts to ISP changes.
+
+## Secure DNS
+
+Many ISPs block websites not only via DPI but also through **DNS poisoning** — returning fake IP addresses for blocked domains. desyncd automatically bypasses this by resolving domains through public DNS servers (Cloudflare 1.1.1.1, Google 8.8.8.8) via direct UDP queries.
+
+- **Enabled by default** — no configuration needed
+- **Zero dependencies** — custom DNS wire format implementation, no external DNS libraries
+- **Automatic fallback** — if public DNS fails, falls back to system DNS
+- **Poisoning detection** — logs a warning when system DNS and public DNS return different IPs
+
+To disable (e.g., on a corporate network with internal DNS):
+```toml
+[adaptation]
+secure_dns = false
+```
+
 ## Stealth Features
 
 | Parameter | Effect |
@@ -226,7 +246,7 @@ desyncd-proxy        Multi-protocol proxy (SOCKS5/4/4a, HTTP), action executor
 desyncd-desync       Bypass techniques (Technique trait + registry)
 desyncd-packet       Protocol parsing (TLS/HTTP/QUIC)
 desyncd-strategy     Strategy selection, domain matching (RFC 6125)
-desyncd-adapt        Auto-adaptation engine, smart prediction, probing
+desyncd-adapt        Auto-adaptation engine, smart prediction, probing, secure DNS
 desyncd-store        SQLite persistence, cross-domain strategy queries
 desyncd-platform     Platform abstraction (firewall, NFQ)
 desyncd-nfq          Linux NFQUEUE handler
@@ -279,6 +299,7 @@ cargo build --release
 
 - **7 техник обхода**: TCP split, фрагментация TLS record, инъекция фейковых пакетов, disorder, манипуляция SNI, трюки с HTTP Host, цепочки техник
 - **Автоадаптация**: автоматически тестирует и находит лучшую стратегию для каждого домена
+- **Безопасный DNS**: автоматический обход DNS-отравления через Cloudflare (1.1.1.1) и Google (8.8.8.8) — заблокированные домены больше не «исчезают» из-за поддельных DNS-ответов
 - **Умное предсказание**: переиспользует найденные стратегии для новых доменов — часто обход за <200мс
 - **Двухфазный холодный старт**: мгновенный доступ в интернет с безопасными дефолтами, пока идёт адаптация
 - **Пакетная обработка**: `--preset russia|china|iran`, `--domains-file`, множественные `--domain`
@@ -289,6 +310,7 @@ cargo build --release
 - **Стелс**: рандомизация позиции разбиения, задержки между сегментами, рандомизация фейковых пакетов, TLS padding (анти-ML)
 - **Правила по доменам**: разные стратегии для разных сайтов с поддержкой wildcard (RFC 6125)
 - **Расширяемая архитектура**: новая техника обхода = один трейт — движок, CLI и probe подхватят автоматически
+- **Деградация уверенности**: стратегии автоматически «портятся» со временем; ненадёжные переоткрываются заново
 - **GUI**: десктопное приложение Tauri + Svelte (Windows, macOS, Linux)
 
 ## Быстрый старт
@@ -355,6 +377,7 @@ listen = "127.0.0.1:1080"
 enabled = true
 test_interval_secs = 21600  # 6 часов
 test_domains = ["youtube.com", "rutracker.org"]
+secure_dns = true  # обход DNS-отравления через Cloudflare/Google (по умолчанию: true)
 
 [stealth]
 split_jitter = 4              # рандомизация позиции разбиения +/- N байт
@@ -418,6 +441,23 @@ desyncd run
 Алгоритм: тест базовой связи → умное предсказание (переиспользование известных стратегий) → перебор всех техник → вариации позиции разбиения → комбинирование победителей → оценка и сохранение.
 
 **Умное предсказание:** Когда рабочая стратегия найдена для одного домена, она автоматически пробуется для новых. Поскольку провайдеры обычно используют одинаковые правила DPI, это часто работает — время обнаружения сокращается с ~60с до <200мс.
+
+**Деградация уверенности:** Стратегии имеют оценку уверенности с полупериодом 7 дней. Часто ломающиеся стратегии автоматически понижаются и переоткрываются, обеспечивая адаптацию к изменениям провайдера.
+
+## Безопасный DNS
+
+Многие провайдеры блокируют сайты не только через DPI, но и через **DNS-отравление** — возвращают поддельные IP-адреса для заблокированных доменов. desyncd автоматически обходит это, резолвя домены через публичные DNS-серверы (Cloudflare 1.1.1.1, Google 8.8.8.8) прямыми UDP-запросами.
+
+- **Включён по умолчанию** — настройка не нужна
+- **Без зависимостей** — собственная реализация DNS wire format, без внешних DNS-библиотек
+- **Автоматический fallback** — если публичный DNS не отвечает, используется системный
+- **Обнаружение отравления** — логирует предупреждение, когда системный и публичный DNS возвращают разные IP
+
+Чтобы отключить (например, в корпоративной сети с внутренним DNS):
+```toml
+[adaptation]
+secure_dns = false
+```
 
 ## Стелс-функции
 

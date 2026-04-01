@@ -1,5 +1,6 @@
 //! Probing: test whether a domain is accessible with a given strategy.
 
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use desyncd_desync::PayloadContext;
@@ -25,15 +26,33 @@ pub struct ProbeResult {
 /// This does NOT perform a full TLS handshake (no certificate validation).
 /// It sends a ClientHello, applies the strategy to desync it, and checks
 /// if we get a ServerHello back (or any response at all).
+///
+/// When `secure_dns` is true, resolves the domain via public DNS
+/// (Cloudflare/Google) instead of system DNS to bypass DNS poisoning.
 pub async fn probe_domain(
     domain: &str,
     port: u16,
     strategy: Option<&Strategy>,
     timeout: Duration,
 ) -> ProbeResult {
+    probe_domain_ex(domain, port, strategy, timeout, true).await
+}
+
+/// Extended probe with explicit secure_dns flag.
+pub async fn probe_domain_ex(
+    domain: &str,
+    port: u16,
+    strategy: Option<&Strategy>,
+    timeout: Duration,
+    secure_dns: bool,
+) -> ProbeResult {
     let start = Instant::now();
 
-    let result = tokio::time::timeout(timeout, probe_inner(domain, port, strategy)).await;
+    let result = tokio::time::timeout(
+        timeout,
+        probe_inner(domain, port, strategy, secure_dns),
+    )
+    .await;
 
     let latency = start.elapsed();
 
@@ -78,9 +97,47 @@ async fn probe_inner(
     domain: &str,
     port: u16,
     strategy: Option<&Strategy>,
+    secure_dns: bool,
 ) -> anyhow::Result<bool> {
-    let addr = format!("{}:{}", domain, port);
-    let mut stream = TcpStream::connect(&addr).await?;
+    let mut stream = if secure_dns {
+        // Resolve via public DNS to bypass ISP DNS poisoning.
+        match crate::dns::resolve_secure(domain).await {
+            Ok(ips) => {
+                let mut last_err = None;
+                let mut connected = None;
+                for ip in &ips {
+                    let addr = SocketAddr::new(*ip, port);
+                    match TcpStream::connect(addr).await {
+                        Ok(s) => {
+                            debug!(%domain, ip = %ip, "probe connected via secure DNS");
+                            connected = Some(s);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!(%domain, ip = %ip, error = %e, "secure DNS IP failed");
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                match connected {
+                    Some(s) => s,
+                    None => return Err(last_err
+                        .map(|e| e.into())
+                        .unwrap_or_else(|| anyhow::anyhow!("no IPs from secure DNS"))),
+                }
+            }
+            Err(e) => {
+                // Secure DNS failed, fall back to system DNS.
+                debug!(%domain, error = %e, "secure DNS failed, using system DNS");
+                let addr = format!("{}:{}", domain, port);
+                TcpStream::connect(&addr).await?
+            }
+        }
+    } else {
+        let addr = format!("{}:{}", domain, port);
+        TcpStream::connect(&addr).await?
+    };
+
     let peer = stream.peer_addr().ok();
     debug!(%domain, ?peer, "probe connected");
     stream.set_nodelay(true)?;

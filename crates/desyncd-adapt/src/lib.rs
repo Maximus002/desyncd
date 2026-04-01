@@ -3,6 +3,7 @@
 //! Automatically discovers the best DPI bypass strategy for each domain
 //! by probing with different techniques and scoring the results.
 
+pub mod dns;
 pub mod probe;
 pub mod search;
 pub mod scheduler;
@@ -37,6 +38,11 @@ pub struct AdaptConfig {
     /// Path to the SQLite database.
     #[serde(default = "default_db_path")]
     pub db_path: String,
+
+    /// Use public DNS (Cloudflare 1.1.1.1, Google 8.8.8.8) instead of
+    /// system DNS for probe resolution. Bypasses ISP DNS poisoning.
+    #[serde(default = "default_true")]
+    pub secure_dns: bool,
 }
 
 impl Default for AdaptConfig {
@@ -48,6 +54,7 @@ impl Default for AdaptConfig {
             max_probes: default_max_probes(),
             timeout_secs: default_timeout(),
             db_path: default_db_path(),
+            secure_dns: true,
         }
     }
 }
