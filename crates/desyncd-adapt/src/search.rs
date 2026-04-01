@@ -225,7 +225,7 @@ pub async fn find_best_strategy(
     let mut best_score: f64 = 0.0;
     let mut best_strategy: Option<Strategy> = None;
 
-    for (tech_name, _, _) in &winners {
+    'outer: for (tech_name, _, _) in &winners {
         for split_pos in &split_variations {
             // Skip if we already tested this combination.
             if matches!(split_pos, SplitPosition::Sni) {
@@ -259,7 +259,7 @@ pub async fn find_best_strategy(
 
             // Respect max_probes limit.
             if all_probes.len() >= engine.config.max_probes {
-                break;
+                break 'outer;
             }
         }
     }

@@ -141,6 +141,7 @@ async fn handle_connect_tunnel(
 ///
 /// For plain HTTP requests, we connect to the target, rewrite the request
 /// to use a relative path (as the upstream server expects), and relay.
+#[allow(clippy::too_many_arguments)]
 async fn handle_forward_proxy(
     mut client: TcpStream,
     peer_addr: std::net::SocketAddr,

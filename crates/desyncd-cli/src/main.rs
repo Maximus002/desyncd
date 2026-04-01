@@ -626,8 +626,10 @@ fn get_preset_domains(preset: &str) -> anyhow::Result<Vec<String>> {
 /// Launch the GUI application.
 fn launch_gui() -> anyhow::Result<()> {
     // Try to find the GUI binary next to the current executable, or in PATH.
-    let current_exe = std::env::current_exe().unwrap_or_default();
-    let exe_dir = current_exe.parent().unwrap_or(std::path::Path::new("."));
+    let current_exe = std::env::current_exe()
+        .context("failed to get current executable path")?;
+    let exe_dir = current_exe.parent()
+        .context("executable path has no parent directory")?;
 
     // Candidates: same directory as CLI, then macOS app bundle, then PATH.
     let candidates = [
@@ -660,7 +662,7 @@ fn launch_gui() -> anyhow::Result<()> {
             let status = std::process::Command::new("open")
                 .arg(&app_path)
                 .spawn();
-            if let Ok(_) = status {
+            if status.is_ok() {
                 println!("GUI launched via macOS open.");
                 return Ok(());
             }

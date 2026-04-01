@@ -481,11 +481,18 @@ fn resolve_config_path() -> PathBuf {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let config_dir: Option<PathBuf> = None;
 
-    config_dir.unwrap_or_else(|| PathBuf::from(".")).join("config.toml")
+    config_dir
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config/desyncd")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("config.toml")
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(stripped) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(stripped);
         }

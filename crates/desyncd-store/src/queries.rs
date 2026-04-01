@@ -484,9 +484,9 @@ fn parse_age_secs(datetime_str: &str) -> f64 {
         return 0.0; // Can't parse, treat as fresh.
     }
 
-    let year: i64 = parts[0].parse().unwrap_or(2026);
-    let month: i64 = parts[1].parse().unwrap_or(1);
-    let day: i64 = parts[2].parse().unwrap_or(1);
+    let Ok(year) = parts[0].parse::<i64>() else { return 0.0 };
+    let Ok(month) = parts[1].parse::<i64>() else { return 0.0 };
+    let Ok(day) = parts[2].parse::<i64>() else { return 0.0 };
     let hour: i64 = parts[3].parse().unwrap_or(0);
     let min: i64 = parts[4].parse().unwrap_or(0);
     let sec: i64 = parts[5].parse().unwrap_or(0);

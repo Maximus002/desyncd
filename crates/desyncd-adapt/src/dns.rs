@@ -164,7 +164,7 @@ async fn query_dns_dot(
     tokio::time::timeout(DNS_TIMEOUT, tls_stream.read_exact(&mut len_buf)).await??;
     let resp_len = u16::from_be_bytes(len_buf) as usize;
 
-    if resp_len > 4096 {
+    if resp_len > 65535 {
         anyhow::bail!("DNS response too large: {}", resp_len);
     }
 
@@ -298,6 +298,9 @@ fn skip_dns_name(data: &[u8], mut pos: usize) -> anyhow::Result<usize> {
 
         if len & 0xC0 == 0xC0 {
             // Compression pointer — 2 bytes, done.
+            if pos + 2 > data.len() {
+                anyhow::bail!("DNS compression pointer extends past end of packet");
+            }
             pos += 2;
             break;
         }

@@ -40,7 +40,7 @@ impl Technique for FakePacketTechnique {
     ) -> Result<DesyncAction> {
         let mut fake_config = FakeConfig::default();
         if let Some(ref ft) = config.fake_type {
-            fake_config.fake_type = ft.clone();
+            fake_config.fake_type = *ft;
         }
         apply_socks(ctx, &fake_config, stealth)
     }

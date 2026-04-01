@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
-  import { onMount } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { onMount, onDestroy } from 'svelte';
 
   interface ProbeResult {
     technique: string;
@@ -38,6 +38,7 @@
   let configPath = $state('');
   let progress = $state<Progress | null>(null);
   let expandedDomain = $state('');
+  let unlisten: UnlistenFn | null = null;
 
   onMount(async () => {
     try {
@@ -46,9 +47,13 @@
       // Ignore
     }
 
-    await listen<Progress>('adapt-progress', (event) => {
+    unlisten = await listen<Progress>('adapt-progress', (event) => {
       progress = event.payload;
     });
+  });
+
+  onDestroy(() => {
+    if (unlisten) unlisten();
   });
 
   async function runAdapt() {
@@ -86,7 +91,7 @@
 
   function usePreset() {
     const presetDomains: Record<string, string> = {
-      'russia': 'facebook.com\ninstagram.com\ntwitter.com\nx.com\nyoutube.com\ndiscord.com\nlinkedin.com\nmedium.com',
+      'russia': 'facebook.com\ninstagram.com\ntwitter.com\nx.com\nyoutube.com\ndiscord.com\nlinkedin.com\nmedium.com\nmeduza.io',
       'china': 'google.com\nyoutube.com\nfacebook.com\ntwitter.com\nwikipedia.org\ninstagram.com',
       'iran': 'youtube.com\nfacebook.com\ntwitter.com\ntelegram.org\ninstagram.com',
       'test': 'facebook.com\nyoutube.com',
