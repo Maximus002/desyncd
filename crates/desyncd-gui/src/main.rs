@@ -423,13 +423,15 @@ fn generate_config_for_gui(
         priority += 1;
     }
 
-    let default_strategy = discovered.first()
-        .map(|(d, _)| d.replace('.', "_").replace('*', "wildcard"))
-        .unwrap_or_else(|| "passthrough".into());
+    // Default catch-all: passthrough for unmatched domains.
+    strategies.insert(
+        "passthrough".into(),
+        desyncd_config::StrategyDef { techniques: vec![] },
+    );
 
     rules.push(desyncd_strategy::MatchRule {
         domains: vec!["*".into()],
-        strategy: default_strategy,
+        strategy: "passthrough".into(),
         priority: 0,
     });
 

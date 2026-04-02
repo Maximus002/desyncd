@@ -474,7 +474,10 @@ pub fn recommended_stealth() -> StealthConfig {
     StealthConfig {
         split_jitter: 4,
         timing_jitter_us: 500,
-        randomize_tls_padding: true,
+        // MUST be false in proxy mode: the ClientHello belongs to the real TLS
+        // client (browser). Modifying it changes the transcript hash, causing
+        // client and server to derive different keys → SSL_ERROR_BAD_MAC_READ.
+        randomize_tls_padding: false,
         fake_size_range: Some((48, 200)),
     }
 }

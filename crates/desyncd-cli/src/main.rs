@@ -472,22 +472,17 @@ fn generate_config(
         priority += 1;
     }
 
-    // Default catch-all: use the first discovered strategy (which was
-    // found by adapt to actually work on this ISP) for all unmatched domains.
-    // This covers CDN domains (e.g. *.fbcdn.net for facebook.com, *.twimg.com
-    // for twitter.com) that share the same DPI rules.
-    let default_strategy_name = if let Some((domain, _)) = discovered.first() {
-        domain.replace('.', "_").replace('*', "wildcard")
-    } else {
-        // No discovered strategies — use passthrough.
-        strategies.insert(
-            "passthrough".into(),
-            desyncd_config::StrategyDef {
-                techniques: vec![],
-            },
-        );
-        "passthrough".into()
-    };
+    // Default catch-all: passthrough for unmatched domains.
+    // Only apply desync to the specific blocked domains discovered above.
+    // Applying tls_record_frag to all traffic is unnecessary and can break
+    // some TLS implementations.
+    strategies.insert(
+        "passthrough".into(),
+        desyncd_config::StrategyDef {
+            techniques: vec![],
+        },
+    );
+    let default_strategy_name = "passthrough".to_string();
 
     rules.push(desyncd_strategy::MatchRule {
         domains: vec!["*".into()],

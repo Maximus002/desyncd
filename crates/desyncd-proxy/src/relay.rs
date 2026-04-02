@@ -54,14 +54,11 @@ pub async fn relay_with_desync(
 
     debug!(len = first_buf.len(), ?domain, "intercepted first outbound data");
 
-    // Apply TLS padding if stealth config requests it (anti-ML).
-    let first_buf = if stealth.is_some_and(|s| s.randomize_tls_padding) {
-        let pad_len = fastrand::usize(16..=256);
-        desyncd_desync::padding::add_tls_padding(&first_buf, pad_len)
-            .unwrap_or(first_buf)
-    } else {
-        first_buf
-    };
+    // NOTE: randomize_tls_padding MUST NOT be applied in proxy mode.
+    // The ClientHello belongs to the actual TLS client (browser). Modifying it
+    // changes the TLS transcript hash, causing the client and server to derive
+    // different keys → SSL_ERROR_BAD_MAC_READ. Padding is only safe when we
+    // generate our own ClientHello (probe mode).
 
     // Create payload context and apply strategy.
     let ctx = PayloadContext::new(first_buf.clone());
