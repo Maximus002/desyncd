@@ -30,7 +30,16 @@ pub async fn run_socks_proxy(
     info!(%listen_addr, "proxy listening (SOCKS5 + SOCKS4 + HTTP proxy auto-detect)");
 
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                // Transient errors (fd exhaustion, etc.) should not crash the proxy.
+                // Log and retry after a brief pause to let fds get freed.
+                error!(error = %e, "accept error (retrying in 50ms)");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                continue;
+            }
+        };
         let selector = selector.clone();
         let stealth = stealth.clone();
 

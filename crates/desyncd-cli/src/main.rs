@@ -12,6 +12,11 @@ use desyncd_types::{Mode, StealthConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Raise file descriptor limit before anything else.
+    // Proxy-heavy clients like Telegram can open 200+ simultaneous connections,
+    // each needing 2 fds (client + upstream). macOS default soft limit is 256.
+    raise_fd_limit();
+
     let cli = Cli::parse();
     let config = AppConfig::load(&cli).context("failed to load configuration")?;
 
@@ -685,4 +690,34 @@ fn expand_tilde(path: &str) -> PathBuf {
         }
     }
     PathBuf::from(path)
+}
+
+/// Raise the file descriptor soft limit to the hard limit.
+///
+/// Proxy-heavy clients (Telegram, browsers) can open 200+ simultaneous
+/// connections. Each proxied connection needs 2 fds (client socket + upstream
+/// socket), so 200 connections = 400 fds. macOS default soft limit is 256,
+/// Linux is typically 1024. This raises the soft limit to the hard limit
+/// (typically 10240 on macOS, 1048576 on Linux).
+fn raise_fd_limit() {
+    #[cfg(unix)]
+    {
+        use std::io;
+        // getrlimit/setrlimit for RLIMIT_NOFILE
+        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        unsafe {
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+                let old = rlim.rlim_cur;
+                if rlim.rlim_cur < rlim.rlim_max {
+                    rlim.rlim_cur = rlim.rlim_max;
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+                        eprintln!("fd limit raised: {} -> {}", old, rlim.rlim_cur);
+                    } else {
+                        let err = io::Error::last_os_error();
+                        eprintln!("warning: failed to raise fd limit: {}", err);
+                    }
+                }
+            }
+        }
+    }
 }

@@ -733,6 +733,7 @@ dependencies = [
  "desyncd-store",
  "desyncd-strategy",
  "desyncd-types",
+ "libc",
  "tokio",
  "toml 0.8.23",
  "tracing",
