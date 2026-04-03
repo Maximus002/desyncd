@@ -158,10 +158,5 @@ fn process_packet(
             tracker.mark_applied(&conn_key, seq, AppliedAction::PassThrough);
             Verdict::Accept
         }
-        DesyncAction::SlowSplit { .. } => {
-            debug!("nfq: slow_split not implemented in NFQ mode, accepting (use SOCKS mode)");
-            tracker.mark_applied(&conn_key, seq, AppliedAction::PassThrough);
-            Verdict::Accept
-        }
     }
 }

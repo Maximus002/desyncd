@@ -60,23 +60,6 @@ pub async fn execute_action<W: AsyncWrite + Unpin>(
             maybe_timing_jitter(stealth).await;
             stream.write_all(original).await?;
         }
-        DesyncAction::SlowSplit { chunks, delay_us } => {
-            debug!(
-                num_chunks = chunks.len(),
-                delay_ms = delay_us / 1000,
-                "desync: slow split (DPI timeout exploitation)"
-            );
-            for (i, chunk) in chunks.iter().enumerate() {
-                trace!(chunk_idx = i, len = chunk.len(), "sending slow split chunk");
-                stream.write_all(chunk).await?;
-                stream.flush().await?;
-                // Apply the long inter-segment delay between chunks (not after last).
-                if i + 1 < chunks.len() {
-                    debug!(delay_ms = delay_us / 1000, "slow_split: waiting for DPI timeout");
-                    tokio::time::sleep(Duration::from_micros(*delay_us as u64)).await;
-                }
-            }
-        }
     }
     Ok(())
 }

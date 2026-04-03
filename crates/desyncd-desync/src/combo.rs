@@ -85,18 +85,6 @@ pub fn apply_chain(
                 );
                 accumulated_prefix.extend(fakes);
             }
-            DesyncAction::SlowSplit { chunks, delay_us } => {
-                debug!(
-                    technique = name,
-                    step = i,
-                    num_chunks = chunks.len(),
-                    delay_ms = delay_us / 1000,
-                    "combo: slow split"
-                );
-                // SlowSplit is terminal — return directly since delay
-                // semantics can't be composed with further techniques.
-                return Ok(DesyncAction::SlowSplit { chunks, delay_us });
-            }
         }
     }
 

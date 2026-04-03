@@ -168,8 +168,6 @@ pub async fn find_best_strategy(
     let techniques = [
         ("tcp_split", SplitPosition::Sni),
         ("tls_record_frag", SplitPosition::Sni),
-        ("ccs_inject", SplitPosition::Sni),
-        ("slow_split", SplitPosition::Sni),
         ("disorder", SplitPosition::Sni),
         ("sni_manip", SplitPosition::Sni),
     ];
