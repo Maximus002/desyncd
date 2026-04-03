@@ -249,7 +249,26 @@ async fn handle_forward_proxy(
 }
 
 /// Parse "host:port" string, defaulting to port 443 if not specified.
+/// Handles IPv6 bracket notation: `[::1]:443`, `[2001:db8::1]:8080`.
 fn parse_host_port(target: &str) -> anyhow::Result<(String, u16)> {
+    // IPv6 bracket notation: [addr]:port
+    if target.starts_with('[') {
+        if let Some(bracket_end) = target.find(']') {
+            let host = &target[1..bracket_end];
+            let port = if bracket_end + 1 < target.len()
+                && target.as_bytes()[bracket_end + 1] == b':'
+            {
+                target[bracket_end + 2..]
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("invalid port in target: {}", target))?
+            } else {
+                443
+            };
+            return Ok((host.to_string(), port));
+        }
+    }
+
+    // IPv4 / hostname: host:port
     if let Some(colon_pos) = target.rfind(':') {
         let host = &target[..colon_pos];
         let port_str = &target[colon_pos + 1..];
@@ -280,8 +299,23 @@ fn parse_absolute_url(url: &str) -> anyhow::Result<(String, u16, String)> {
         None => (without_scheme, "/"),
     };
 
-    // Parse host and port.
-    let (host, port) = if let Some(colon_pos) = host_port.rfind(':') {
+    // Parse host and port (handles IPv6 bracket notation).
+    let (host, port) = if host_port.starts_with('[') {
+        // IPv6: [addr]:port
+        if let Some(bracket_end) = host_port.find(']') {
+            let h = &host_port[1..bracket_end];
+            let p = if bracket_end + 1 < host_port.len()
+                && host_port.as_bytes()[bracket_end + 1] == b':'
+            {
+                host_port[bracket_end + 2..].parse().unwrap_or(80)
+            } else {
+                80
+            };
+            (h.to_string(), p)
+        } else {
+            (host_port.to_string(), 80)
+        }
+    } else if let Some(colon_pos) = host_port.rfind(':') {
         let host = &host_port[..colon_pos];
         let port: u16 = host_port[colon_pos + 1..]
             .parse()
@@ -328,6 +362,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_host_port_ipv6() {
+        let (host, port) = parse_host_port("[::1]:443").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 443);
+
+        let (host, port) = parse_host_port("[2001:db8::1]:8080").unwrap();
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 8080);
+
+        let (host, port) = parse_host_port("[::1]").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
     fn test_parse_absolute_url() {
         let (host, port, path) = parse_absolute_url("http://example.com/foo/bar").unwrap();
         assert_eq!(host, "example.com");
@@ -343,5 +392,18 @@ mod tests {
         assert_eq!(host, "example.com");
         assert_eq!(port, 80);
         assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn test_parse_absolute_url_ipv6() {
+        let (host, port, path) = parse_absolute_url("http://[::1]:8080/test").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 8080);
+        assert_eq!(path, "/test");
+
+        let (host, port, path) = parse_absolute_url("http://[::1]/path").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 80);
+        assert_eq!(path, "/path");
     }
 }

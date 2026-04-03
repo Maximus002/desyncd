@@ -11,12 +11,13 @@
 //! Enabled via `[adaptation] secure_dns = true` in config (default).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tracing::{debug, warn};
+use tokio_rustls::client::TlsStream;
+use tracing::{debug, trace, warn};
 
 /// DoT server: (IP, SNI hostname for certificate validation).
 const DOT_SERVERS: &[(IpAddr, &str)] = &[
@@ -35,19 +36,63 @@ const UDP_DNS_SERVERS: &[IpAddr] = &[
 /// Timeout per DNS query.
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Build a shared TLS config for DoT connections.
+/// Build a shared TLS config for DoT connections (cached).
 fn dot_tls_config() -> Arc<rustls::ClientConfig> {
-    let root_store = rustls::RootCertStore::from_iter(
-        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
-    );
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("TLS protocol versions")
-    .with_root_certificates(root_store)
-    .with_no_client_auth();
-    Arc::new(config)
+    static TLS_CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    TLS_CONFIG.get_or_init(|| {
+        let root_store = rustls::RootCertStore::from_iter(
+            webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+        );
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("TLS protocol versions")
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+        Arc::new(config)
+    }).clone()
+}
+
+/// Pool of persistent DoT connections to avoid repeated TLS handshakes.
+struct DotPool {
+    /// One cached connection per server index.
+    conns: Vec<tokio::sync::Mutex<Option<TlsStream<TcpStream>>>>,
+}
+
+impl DotPool {
+    fn new() -> Self {
+        let conns = DOT_SERVERS.iter().map(|_| tokio::sync::Mutex::new(None)).collect();
+        Self { conns }
+    }
+
+    /// Get or create a DoT connection for the given server index.
+    async fn get_or_connect(
+        &self,
+        server_idx: usize,
+        tls_config: &Arc<rustls::ClientConfig>,
+    ) -> anyhow::Result<tokio::sync::MutexGuard<'_, Option<TlsStream<TcpStream>>>> {
+        let mut guard = self.conns[server_idx].lock().await;
+        if guard.is_none() {
+            let (ip, sni) = DOT_SERVERS[server_idx];
+            let addr = SocketAddr::new(ip, 853);
+            let tcp = tokio::time::timeout(DNS_TIMEOUT, TcpStream::connect(addr)).await??;
+            let connector = tokio_rustls::TlsConnector::from(tls_config.clone());
+            let server_name = rustls::pki_types::ServerName::try_from(sni.to_string())?;
+            let tls_stream = tokio::time::timeout(
+                DNS_TIMEOUT,
+                connector.connect(server_name, tcp),
+            ).await??;
+            trace!(server = %ip, "DoT: new TLS connection established");
+            *guard = Some(tls_stream);
+        }
+        Ok(guard)
+    }
+}
+
+fn dot_pool() -> &'static DotPool {
+    static POOL: OnceLock<DotPool> = OnceLock::new();
+    POOL.get_or_init(DotPool::new)
 }
 
 /// Resolve a domain to IP addresses using secure DNS.
@@ -107,11 +152,13 @@ pub async fn resolve_with_fallback(domain: &str) -> anyhow::Result<Vec<IpAddr>> 
 ///
 /// DNS-over-TLS: same wire format as TCP DNS (2-byte length prefix + query),
 /// but over a TLS connection. The ISP sees only encrypted traffic to port 853.
+/// Uses a persistent connection pool to avoid repeated TLS handshakes.
 async fn resolve_dot(domain: &str) -> anyhow::Result<Vec<IpAddr>> {
     let tls_config = dot_tls_config();
+    let pool = dot_pool();
 
-    for &(server_ip, sni) in DOT_SERVERS {
-        match query_dns_dot(domain, server_ip, sni, &tls_config).await {
+    for (idx, &(server_ip, _)) in DOT_SERVERS.iter().enumerate() {
+        match query_dns_dot_pooled(domain, idx, &tls_config, pool).await {
             Ok(ips) if !ips.is_empty() => {
                 debug!(
                     %domain, server = %server_ip, ips = ?ips,
@@ -131,37 +178,48 @@ async fn resolve_dot(domain: &str) -> anyhow::Result<Vec<IpAddr>> {
     anyhow::bail!("all DoT servers failed for {}", domain)
 }
 
-/// Send a single DNS query over TLS to a DoT server.
-async fn query_dns_dot(
+/// Send a DNS query over a pooled DoT connection.
+/// On connection failure, invalidates the cached connection and retries once.
+async fn query_dns_dot_pooled(
     domain: &str,
-    server_ip: IpAddr,
-    sni: &str,
+    server_idx: usize,
     tls_config: &Arc<rustls::ClientConfig>,
+    pool: &DotPool,
 ) -> anyhow::Result<Vec<IpAddr>> {
-    let addr = SocketAddr::new(server_ip, 853);
-    let tcp = tokio::time::timeout(DNS_TIMEOUT, TcpStream::connect(addr)).await??;
+    // Try with existing/new pooled connection.
+    let result = query_on_pooled_conn(domain, server_idx, tls_config, pool).await;
+    match result {
+        Ok(ips) => Ok(ips),
+        Err(e) => {
+            // Connection may be stale — drop it and retry with a fresh one.
+            trace!(server_idx, error = %e, "DoT pooled connection failed, reconnecting");
+            {
+                let mut guard = pool.conns[server_idx].lock().await;
+                *guard = None;
+            }
+            query_on_pooled_conn(domain, server_idx, tls_config, pool).await
+        }
+    }
+}
 
-    let connector = tokio_rustls::TlsConnector::from(tls_config.clone());
-    let server_name = rustls::pki_types::ServerName::try_from(sni.to_string())?;
+/// Execute a DNS query on a pooled connection.
+async fn query_on_pooled_conn(
+    domain: &str,
+    server_idx: usize,
+    tls_config: &Arc<rustls::ClientConfig>,
+    pool: &DotPool,
+) -> anyhow::Result<Vec<IpAddr>> {
+    let mut guard = pool.get_or_connect(server_idx, tls_config).await?;
+    let stream = guard.as_mut().ok_or_else(|| anyhow::anyhow!("no connection"))?;
 
-    let mut tls_stream = tokio::time::timeout(
-        DNS_TIMEOUT,
-        connector.connect(server_name, tcp),
-    )
-    .await??;
-
-    // Build DNS query.
     let query = build_dns_query(domain);
-
-    // TCP/TLS DNS framing: 2-byte big-endian length prefix.
     let len_prefix = (query.len() as u16).to_be_bytes();
-    tls_stream.write_all(&len_prefix).await?;
-    tls_stream.write_all(&query).await?;
-    tls_stream.flush().await?;
+    stream.write_all(&len_prefix).await?;
+    stream.write_all(&query).await?;
+    stream.flush().await?;
 
-    // Read response: 2-byte length prefix, then message.
     let mut len_buf = [0u8; 2];
-    tokio::time::timeout(DNS_TIMEOUT, tls_stream.read_exact(&mut len_buf)).await??;
+    tokio::time::timeout(DNS_TIMEOUT, stream.read_exact(&mut len_buf)).await??;
     let resp_len = u16::from_be_bytes(len_buf) as usize;
 
     if resp_len > 65535 {
@@ -169,7 +227,7 @@ async fn query_dns_dot(
     }
 
     let mut resp_buf = vec![0u8; resp_len];
-    tokio::time::timeout(DNS_TIMEOUT, tls_stream.read_exact(&mut resp_buf)).await??;
+    tokio::time::timeout(DNS_TIMEOUT, stream.read_exact(&mut resp_buf)).await??;
 
     parse_dns_response(&resp_buf)
 }

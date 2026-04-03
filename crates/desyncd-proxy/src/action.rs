@@ -40,8 +40,11 @@ pub async fn execute_action<W: AsyncWrite + Unpin>(
             for (i, chunk) in chunks.iter().enumerate() {
                 trace!(chunk_idx = i, len = chunk.len(), "sending chunk");
                 stream.write_all(chunk).await?;
-                stream.flush().await?;
-                maybe_timing_jitter(stealth).await;
+                // TCP_NODELAY ensures each write_all maps to a separate segment.
+                // Only apply timing jitter between chunks (no flush syscall needed).
+                if i + 1 < chunks.len() {
+                    maybe_timing_jitter(stealth).await;
+                }
             }
         }
         DesyncAction::InjectBefore(fake_chunks) => {

@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS test_results (
 CREATE INDEX IF NOT EXISTS idx_test_results_domain
     ON test_results(domain, tested_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_test_results_tested_at
+    ON test_results(tested_at);
+
 CREATE TABLE IF NOT EXISTS domain_strategies (
     domain      TEXT PRIMARY KEY,
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),

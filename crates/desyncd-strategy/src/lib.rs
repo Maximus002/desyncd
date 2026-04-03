@@ -4,6 +4,8 @@
 //! The selector matches connections to strategies based on domain, port,
 //! and protocol rules.
 
+use std::collections::HashMap;
+
 use desyncd_desync::technique::TechniqueConfig;
 use desyncd_desync::PayloadContext;
 use desyncd_types::{AppProtocol, DesyncAction, Result};
@@ -60,7 +62,7 @@ pub struct MatchRule {
 
 /// The strategy selector holds all strategies and rules.
 pub struct Selector {
-    strategies: Vec<Strategy>,
+    strategies: HashMap<String, Strategy>,
     rules: Vec<MatchRule>,
     default_strategy: Option<String>,
 }
@@ -73,6 +75,10 @@ impl Selector {
     ) -> Self {
         // Sort rules by priority descending.
         rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        let strategies = strategies
+            .into_iter()
+            .map(|s| (s.name.clone(), s))
+            .collect();
         Self {
             strategies,
             rules,
@@ -85,7 +91,7 @@ impl Selector {
         if let Some(domain) = domain {
             for rule in &self.rules {
                 if rule.domains.iter().any(|pat| domain_matches(pat, domain)) {
-                    return self.find_strategy(&rule.strategy);
+                    return self.strategies.get(&rule.strategy);
                 }
             }
         }
@@ -93,7 +99,7 @@ impl Selector {
         // Fall back to default strategy.
         self.default_strategy
             .as_ref()
-            .and_then(|name| self.find_strategy(name))
+            .and_then(|name| self.strategies.get(name))
     }
 
     /// Apply the selected strategy to a payload.
@@ -102,18 +108,13 @@ impl Selector {
     /// the matching strategy.
     pub fn apply(&self, ctx: &PayloadContext) -> Result<DesyncAction> {
         let domain = extract_domain(&ctx.protocol);
-        let strategy = self.select(domain.as_deref());
+        let strategy = self.select(domain);
 
         match strategy {
             Some(s) => {
                 info!(
                     strategy = %s.name,
                     domain = ?domain,
-                    techniques = %s.techniques.iter()
-                        .filter(|t| t.enabled)
-                        .map(|t| t.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("+"),
                     "applying desync strategy"
                 );
                 s.apply(ctx)
@@ -124,19 +125,15 @@ impl Selector {
             }
         }
     }
-
-    fn find_strategy(&self, name: &str) -> Option<&Strategy> {
-        self.strategies.iter().find(|s| s.name == name)
-    }
 }
 
 /// Extract domain from detected protocol info.
-fn extract_domain(proto: &AppProtocol) -> Option<String> {
+fn extract_domain(proto: &AppProtocol) -> Option<&str> {
     match proto {
-        AppProtocol::TlsClientHello { sni: Some(sni), .. } => Some(sni.clone()),
+        AppProtocol::TlsClientHello { sni: Some(sni), .. } => Some(sni.as_str()),
         AppProtocol::HttpRequest { host: Some(host), .. } => {
             // Strip port if present.
-            Some(host.split(':').next().unwrap_or(host).to_string())
+            Some(host.split(':').next().unwrap_or(host))
         }
         _ => None,
     }

@@ -76,14 +76,14 @@ pub async fn find_best_strategy(
                 // First probe failed — skip this candidate, record failure.
                 let _ = engine.store.record_relay_failure(domain);
                 debug!(%domain, strategy = %label, "fast guess: first probe failed");
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
             }
 
             // First probe succeeded — validate with FAST_GUESS_CONFIRMS more.
             let mut confirm_ok = 0usize;
             for i in 0..FAST_GUESS_CONFIRMS {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
                 let confirm = probe::probe_domain_ex(domain, port, Some(strategy), timeout, secure_dns).await;
                 all_probes.push((format!("guess_confirm:{}:{}", label, i + 1), confirm.clone()));
                 if confirm.success {
@@ -207,8 +207,8 @@ pub async fn find_best_strategy(
             debug!(technique = tech_name, score, "technique succeeded");
         }
 
-        // Rate limiting: 1 probe per second.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Rate limiting between probes.
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     // Step 3: Parameter variations for winners.
@@ -255,7 +255,7 @@ pub async fn find_best_strategy(
                 best_strategy = Some(strategy);
             }
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
 
             // Respect max_probes limit.
             if all_probes.len() >= engine.config.max_probes {
@@ -331,7 +331,7 @@ pub async fn find_best_strategy(
                 info!(technique = tech_name, score, "stealth technique succeeded!");
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             if all_probes.len() >= engine.config.max_probes {
                 break;
@@ -345,7 +345,7 @@ pub async fn find_best_strategy(
         let mut confirm_successes = 0;
 
         for i in 0..confirm_count {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
             let result = probe::probe_domain_ex(domain, port, Some(strategy), timeout, secure_dns).await;
             let label = format!("confirm_{}", i + 1);
             all_probes.push((label, result.clone()));

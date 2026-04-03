@@ -95,21 +95,6 @@ pub fn apply(ctx: &PayloadContext, split_pos: &SplitPosition) -> Result<DesyncAc
     let first_data = &record_data[..data_offset];
     let second_data = &record_data[data_offset..record_data_len];
 
-    // Build two TLS records.
-    let mut first_record = Vec::with_capacity(5 + first_data.len());
-    first_record.push(CONTENT_TYPE_HANDSHAKE);
-    first_record.push(version_major);
-    first_record.push(version_minor);
-    first_record.extend_from_slice(&(first_data.len() as u16).to_be_bytes());
-    first_record.extend_from_slice(first_data);
-
-    let mut second_record = Vec::with_capacity(5 + second_data.len());
-    second_record.push(CONTENT_TYPE_HANDSHAKE);
-    second_record.push(version_major);
-    second_record.push(version_minor);
-    second_record.extend_from_slice(&(second_data.len() as u16).to_be_bytes());
-    second_record.extend_from_slice(second_data);
-
     debug!(
         data_offset,
         first_len = first_data.len(),
@@ -117,12 +102,23 @@ pub fn apply(ctx: &PayloadContext, split_pos: &SplitPosition) -> Result<DesyncAc
         "tls_record_frag: splitting into two TLS records"
     );
 
-    // Return as a replacement: the original single-record payload is replaced
-    // by the concatenation of two records. In SOCKS mode, these can optionally
-    // be sent as separate TCP segments via Split.
-    let mut combined = Vec::with_capacity(first_record.len() + second_record.len());
-    combined.extend_from_slice(&first_record);
-    combined.extend_from_slice(&second_record);
+    // Build both TLS records in a single allocation.
+    let total_len = 10 + record_data_len; // 2 headers (5 bytes each) + all data
+    let mut combined = Vec::with_capacity(total_len);
+
+    // First record header + data.
+    combined.push(CONTENT_TYPE_HANDSHAKE);
+    combined.push(version_major);
+    combined.push(version_minor);
+    combined.extend_from_slice(&(first_data.len() as u16).to_be_bytes());
+    combined.extend_from_slice(first_data);
+
+    // Second record header + data.
+    combined.push(CONTENT_TYPE_HANDSHAKE);
+    combined.push(version_major);
+    combined.push(version_minor);
+    combined.extend_from_slice(&(second_data.len() as u16).to_be_bytes());
+    combined.extend_from_slice(second_data);
 
     Ok(DesyncAction::Replace(combined))
 }

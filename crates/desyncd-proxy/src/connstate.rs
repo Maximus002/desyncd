@@ -69,7 +69,12 @@ impl ConnState {
         self.bytes_received.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Whether the connection appears successful (desync applied + got response).
+    /// Whether the connection appears successful.
+    ///
+    /// Returns true if either no desync was applied (passthrough — always "ok"),
+    /// or desync was applied AND upstream responded (desync didn't break it).
+    /// Returns false only when desync was applied but upstream never responded,
+    /// suggesting the technique broke the connection.
     pub fn is_success(&self) -> bool {
         !self.desync_applied.load(Ordering::Relaxed)
             || self.upstream_responded.load(Ordering::Relaxed)

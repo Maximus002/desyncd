@@ -47,10 +47,16 @@ impl Store {
         Ok(store)
     }
 
-    /// Run schema migrations and enable foreign keys.
+    /// Run schema migrations, enable WAL mode, and set performance pragmas.
     fn migrate(&self) -> anyhow::Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("lock: {}", e))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -2000;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA foreign_keys = ON;"
+        )?;
         conn.execute_batch(schema::MIGRATIONS)?;
 
         // Apply additive V2 migrations (new columns).

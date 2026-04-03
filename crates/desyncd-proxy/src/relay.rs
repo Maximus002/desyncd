@@ -61,7 +61,7 @@ pub async fn relay_with_desync(
     // generate our own ClientHello (probe mode).
 
     // Create payload context and apply strategy.
-    let ctx = PayloadContext::new(first_buf.clone());
+    let ctx = PayloadContext::new(first_buf);
     let action = selector.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
 
     // Log the desync action at INFO level so users can diagnose.
@@ -72,7 +72,7 @@ pub async fn relay_with_desync(
         DesyncAction::Replace(data) => {
             info!(
                 ?domain,
-                original_len = first_buf.len(),
+                original_len = ctx.payload.len(),
                 new_len = data.len(),
                 "desync: payload replaced (e.g. tls_record_frag)"
             );
@@ -95,7 +95,7 @@ pub async fn relay_with_desync(
         }
     }
 
-    crate::action::execute_action(&action, &first_buf, &mut upstream, stealth).await?;
+    crate::action::execute_action(&action, &ctx.payload, &mut upstream, stealth).await?;
 
     // --- Bidirectional relay for remaining data ---
     let (mut client_reader, mut client_writer) = client.into_split();
@@ -147,6 +147,11 @@ pub async fn relay_with_desync(
     Ok(())
 }
 
+/// Initial buffer size for first-packet reassembly (4KB).
+/// A typical ClientHello is 200-700 bytes; this covers the common case
+/// without over-allocating. Grows to MAX_FIRST_BUF only if needed.
+const INITIAL_FIRST_BUF: usize = 4096;
+
 /// Reassemble the first outbound message (TLS ClientHello or HTTP request).
 ///
 /// Reads from the client socket, using the TLS parser's `NeedMore` signal
@@ -161,7 +166,7 @@ pub async fn relay_with_desync(
 async fn reassemble_first_message(
     client: &mut TcpStream,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut buf = vec![0u8; MAX_FIRST_BUF];
+    let mut buf = vec![0u8; INITIAL_FIRST_BUF];
     // First read — always do at least one.
     let n = client.read(&mut buf).await?;
     if n == 0 {
@@ -189,8 +194,8 @@ async fn reassemble_first_message(
                 need = needed,
                 "partial TLS data, reading more"
             );
-            // Fall through to reassembly loop.
-            let _ = needed; // We'll re-check after each read.
+            // Grow buffer to MAX_FIRST_BUF for reassembly.
+            buf.resize(MAX_FIRST_BUF, 0);
         }
     }
 
