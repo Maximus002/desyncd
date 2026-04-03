@@ -126,6 +126,10 @@ pub enum DesyncAction {
     Split(Vec<Vec<u8>>),
     /// Inject these chunks before sending the original data.
     InjectBefore(Vec<Vec<u8>>),
+    /// Split with a deliberate inter-segment delay (microseconds).
+    /// Targets DPI reassembly timeouts: the delay causes the DPI to drop
+    /// the first segment from its buffer before the second arrives.
+    SlowSplit { chunks: Vec<Vec<u8>>, delay_us: u32 },
 }
 
 /// Error types for the desyncd project.

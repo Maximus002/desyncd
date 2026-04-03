@@ -149,6 +149,8 @@ impl Default for TechniqueRegistry {
         reg.register(Box::new(super::disorder::DisorderTechnique));
         reg.register(Box::new(super::sni_manip::SniManipTechnique));
         reg.register(Box::new(super::http_host::HttpHostTechnique));
+        reg.register(Box::new(super::slow_split::SlowSplitTechnique));
+        reg.register(Box::new(super::ccs_inject::CcsInjectTechnique));
         reg
     }
 }
@@ -162,5 +164,7 @@ pub fn available_techniques() -> &'static [&'static str] {
         "disorder",
         "sni_manip",
         "http_host",
+        "slow_split",
+        "ccs_inject",
     ]
 }

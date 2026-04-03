@@ -5,6 +5,8 @@ pub mod fake_packet;
 pub mod disorder;
 pub mod sni_manip;
 pub mod http_host;
+pub mod slow_split;
+pub mod ccs_inject;
 pub mod combo;
 pub mod padding;
 

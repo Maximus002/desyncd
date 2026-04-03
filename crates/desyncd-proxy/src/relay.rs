@@ -93,6 +93,16 @@ pub async fn relay_with_desync(
                 "desync: injecting fake packets before real data"
             );
         }
+        DesyncAction::SlowSplit { chunks, delay_us } => {
+            let sizes: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+            info!(
+                ?domain,
+                num_chunks = chunks.len(),
+                delay_ms = delay_us / 1000,
+                ?sizes,
+                "desync: slow split (DPI timeout exploitation)"
+            );
+        }
     }
 
     crate::action::execute_action(&action, &ctx.payload, &mut upstream, stealth).await?;
