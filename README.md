@@ -8,30 +8,49 @@ Adaptive DPI desynchronization tool. Automatically discovers and applies the bes
 
 Combines the power of [zapret](https://github.com/bol-van/zapret) with the simplicity of [byedpi](https://github.com/hufrea/byedpi), in a single Rust binary with auto-adaptation.
 
-## TL;DR (3 commands to get started)
+## One-Line Install
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Maximus002/desyncd/main/install.ps1 | iex
+```
+
+The installer checks for Rust (installs if missing), builds from source, and adds `desyncd` to your PATH.
+
+## Quick Start
 
 ```bash
-# 1. Build
-cargo build --release
+# Auto-discover the best bypass strategy (with DPI classification)
+desyncd adapt --preset russia --morphing --save
 
-# 2. Find what works for your ISP (takes ~1 min per domain)
-./target/release/desyncd adapt --domain youtube.com --domain rutracker.org --save
-
-# 3. Run — config is generated automatically
-./target/release/desyncd run
+# Start the proxy
+desyncd run
 ```
 
 Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 
-> **What does this do?** Your ISP uses DPI (deep packet inspection) to detect and block certain websites by looking at your traffic. desyncd sits between you and the internet, slightly scrambling the packets so the DPI system can't recognize them — but the destination server still understands them perfectly.
+> **What does this do?** Your ISP uses DPI (deep packet inspection) to detect and block certain websites by inspecting your traffic. desyncd sits between you and the internet, slightly scrambling the packets so the DPI system can't recognize them — but the destination server still understands them perfectly.
+
+## What's New in 2.0
+
+- **Protocol Morphing** — intelligent DPI classifier that identifies your ISP's DPI type (TSPU, GFW, etc.) in 5 probes and selects the optimal counter-strategy. Use with `--morphing`.
+- **Multi-Stream Fragmentation** — splits TLS ClientHello into N records (default 3), distributing SNI across all of them. Faster and more robust than single-split fragmentation.
+- **One-line installer** — `curl | bash` for macOS/Linux, PowerShell one-liner for Windows. Handles Rust installation automatically.
+- **Bug fixes** — bounds checking in TLS parser, zero-length domain rejection, error logging in proxy relay.
 
 ## Features
 
-- **7 bypass techniques**: TCP split, TLS record fragmentation, fake packet injection, disorder, SNI manipulation, HTTP Host tricks, and technique chaining
-- **Auto-adaptation**: automatically probes and discovers the best strategy per domain
-- **Secure DNS**: automatic DNS poisoning bypass via DNS-over-TLS to Cloudflare (1.1.1.1) and Google (8.8.8.8) — encrypted queries that ISPs cannot intercept or tamper with
+- **8 bypass techniques**: TCP split, TLS record fragmentation, **multi-stream fragmentation (NEW)**, fake packet injection, disorder, SNI manipulation, HTTP Host tricks, and technique chaining
+- **Protocol Morphing**: classifies DPI type and selects optimal strategy automatically
+- **Auto-adaptation**: probes and discovers the best strategy per domain
+- **Secure DNS**: DNS-over-TLS to Cloudflare/Google — encrypted queries your ISP cannot intercept
 - **Smart prediction**: reuses proven strategies across domains — new domains often bypass in <200ms
-- **Two-phase cold start**: instant internet access with safe defaults while adaptation runs in background
+- **Two-phase cold start**: instant internet with safe defaults while adaptation runs in background
 - **Batch domains**: `--preset russia|china|iran`, `--domains-file`, multi-domain `--domain`
 - **Auto-config**: `adapt --save` generates a ready-to-use config file
 - **Multi-protocol proxy**: SOCKS5, SOCKS4/4a, HTTP CONNECT, HTTP forward proxy — auto-detected on a single port
@@ -39,34 +58,63 @@ Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 - **NFQ packet interception** (Linux): kernel-level via NFQUEUE
 - **Stealth**: split jitter, timing jitter, randomized fake packets, TLS padding extension (anti-ML)
 - **Per-domain rules**: different strategies for different sites, with RFC 6125 wildcard support
-- **Pluggable architecture**: add a new bypass technique by implementing a single trait — the engine, CLI, and probe pick it up automatically
 - **GUI**: Tauri + Svelte desktop app (Windows, macOS, Linux)
-- **Confidence decay**: strategies auto-degrade over time; unreliable ones are automatically re-tested
-- **QUIC awareness**: detects QUIC Initial packets for future UDP desync support
+- **Confidence decay**: strategies auto-degrade over time; unreliable ones are re-tested
 
-## Quick Start
+For detailed technique documentation, see **[docs/TECHNIQUES.md](docs/TECHNIQUES.md)**.
+
+## Installation
+
+### One-line install (recommended)
+
+**macOS / Linux:**
+```bash
+# Install/update
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash
+
+# Install + auto-adapt (Russia preset)
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash -s -- --adapt
+```
+
+**Windows (PowerShell as Administrator):**
+```powershell
+# Install/update
+irm https://raw.githubusercontent.com/Maximus002/desyncd/main/install.ps1 | iex
+
+# Install + auto-adapt
+.\install.ps1 -Adapt
+```
+
+### Manual build
 
 ```bash
-# Build
+# Requirements: Rust 1.70+, git
+git clone https://github.com/Maximus002/desyncd.git
+cd desyncd
 cargo build --release
+./target/release/desyncd --help
+```
 
-# Run with default config (SOCKS5 on 127.0.0.1:1080)
-./target/release/desyncd run
+## Usage
 
+```bash
 # Test which techniques work for a domain
-./target/release/desyncd test --domain youtube.com --all-techniques
+desyncd test --domain twitter.com --all-techniques
 
-# Auto-discover best strategies and generate config
-./target/release/desyncd adapt --domain youtube.com --domain rutracker.org --save
+# Auto-discover best strategies with Protocol Morphing
+desyncd adapt --domain twitter.com --domain discord.com --morphing --save
 
 # Batch adaptation with preset
-./target/release/desyncd adapt --preset russia --save
+desyncd adapt --preset russia --morphing --save
 
-# Batch adaptation with file
-./target/release/desyncd adapt --domains-file my_domains.txt --save
+# Batch adaptation from file
+desyncd adapt --domains-file blocked.txt --morphing --save
+
+# Run the proxy (uses generated config)
+desyncd run
 
 # Show effective config
-./target/release/desyncd show-config
+desyncd show-config
 ```
 
 ### Connecting through the proxy
@@ -77,7 +125,7 @@ cargo build --release
 
 **Command line:**
 ```bash
-curl --proxy socks5h://127.0.0.1:1080 https://youtube.com -I
+curl --proxy socks5h://127.0.0.1:1080 https://twitter.com -I
 # or for all programs:
 export ALL_PROXY=socks5h://127.0.0.1:1080
 ```
@@ -86,132 +134,71 @@ export ALL_PROXY=socks5h://127.0.0.1:1080
 
 | Mode | Platform | Privileges | Description |
 |------|----------|------------|-------------|
-| `socks` | All | None | SOCKS5/4/4a + HTTP CONNECT + HTTP forward proxy (default) |
-| `transparent` | Linux | root | Intercepts via `iptables REDIRECT` + `SO_ORIGINAL_DST` |
-| `nfq` | Linux | root/CAP_NET_ADMIN | Kernel packet interception via NFQUEUE |
+| `socks` | All | None | SOCKS5/4/4a + HTTP proxy (default) |
+| `transparent` | Linux | root | `iptables REDIRECT` + `SO_ORIGINAL_DST` |
+| `nfq` | Linux | root/CAP_NET_ADMIN | Kernel-level via NFQUEUE |
 
-> **Note:** In `socks` mode, the proxy auto-detects the client protocol (SOCKS5, SOCKS4/4a, HTTP CONNECT, plain HTTP) on a single port — no configuration needed.
+## Techniques
+
+| Technique | Layer | vs TSPU | Description |
+|-----------|-------|---------|-------------|
+| `tcp_split` | TCP | - | Splits TCP segment at SNI position |
+| `tls_record_frag` | TLS | **OK** | Fragments ClientHello into 2 TLS records |
+| `multi_stream_frag` | TLS | **OK** | Fragments ClientHello into N TLS records (NEW) |
+| `fake_packet` | TCP | - | Injects fake TLS record before ClientHello |
+| `disorder` | TCP | - | Sends segments in reverse order |
+| `sni_manip` | TLS | - | Modifies SNI: mixed case, removal |
+| `http_host` | HTTP | N/A | Modifies HTTP Host header |
+| `combo` | Chain | Varies | Applies multiple techniques in sequence |
+
+For in-depth documentation with diagrams and test results, see **[docs/TECHNIQUES.md](docs/TECHNIQUES.md)**.
 
 ## Configuration
 
-`adapt --save` auto-generates the config at `~/.config/desyncd/config.toml`. You can also create it manually:
+`adapt --save` auto-generates `~/.config/desyncd/config.toml`:
 
 ```toml
 [general]
 mode = "socks"
-log_level = "info"
 
 [proxy]
 listen = "127.0.0.1:1080"
 
 [adaptation]
 enabled = true
-test_interval_secs = 21600  # 6 hours
-test_domains = ["youtube.com", "rutracker.org"]
-secure_dns = true  # bypass DNS poisoning via Cloudflare/Google (default: true)
+test_interval_secs = 21600
+test_domains = ["twitter.com", "discord.com"]
+secure_dns = true
 
 [stealth]
 split_jitter = 4
 timing_jitter_us = 500
-randomize_tls_padding = true
-fake_size_range = [48, 200]
 
-# --- Strategies ---
 [strategies.default_tls]
 techniques = [
-    { name = "tcp_split", split_position = "Sni" },
-]
-
-[strategies.aggressive]
-techniques = [
     { name = "tls_record_frag", split_position = "Sni" },
-    { name = "tcp_split", split_position = { SniOffset = -2 } },
 ]
-
-# --- Rules ---
-[[rules]]
-domains = ["*.youtube.com", "*.googlevideo.com"]
-strategy = "aggressive"
-priority = 10
 
 [[rules]]
 domains = ["*"]
 strategy = "default_tls"
-priority = 0
 ```
 
-## Techniques
+## Architecture
 
-| Technique | Level | Description |
-|-----------|-------|-------------|
-| `tcp_split` | TCP | Splits TCP segment at SNI position into 2+ sends |
-| `tls_record_frag` | TLS | Fragments ClientHello into multiple TLS records |
-| `fake_packet` | TCP | Injects a fake TLS record before the real ClientHello |
-| `disorder` | TCP | Sends split segments in reverse order |
-| `sni_manip` | TLS | Modifies SNI field: mixed case, removal, or padding |
-| `http_host` | HTTP | Modifies HTTP Host header: mixed case, extra spaces, tabs |
-| combo | Chain | Applies multiple techniques in sequence |
-
-## Auto-Adaptation
-
-```bash
-# Find best strategy for one or more domains, generate config
-desyncd adapt --domain youtube.com --domain discord.com --save
-
-# Use a preset for your region
-desyncd adapt --preset russia --save    # youtube, rutracker, discord, ...
-desyncd adapt --preset china --save     # google, wikipedia, twitter, ...
-
-# Load domains from a file (one per line)
-desyncd adapt --domains-file blocked.txt --save
-
-# Then just run:
-desyncd run
 ```
-
-The engine: baseline test → smart prediction (reuse known strategies) → sweep all techniques → vary split positions → combine winners → score and save.
-
-**Smart prediction:** When a working strategy is found for one domain, it's automatically tried for new domains first. Since ISPs typically use the same DPI rules, this often works — reducing discovery time from ~60s to <200ms.
-
-**Confidence decay:** Strategies have a confidence score that decays over time (7-day half-life). Strategies that fail frequently are automatically demoted and re-tested, ensuring the tool adapts to ISP changes.
-
-## Secure DNS
-
-Many ISPs block websites not only via DPI but also through **DNS poisoning** — returning fake IP addresses for blocked domains. Some ISPs go further and intercept all UDP traffic on port 53, tampering with queries even to public DNS servers like 8.8.8.8.
-
-desyncd solves this with **DNS-over-TLS** (DoT, RFC 7858) — sending encrypted DNS queries to Cloudflare and Google on port 853. The ISP cannot inspect or modify encrypted TLS traffic.
-
-- **Enabled by default** — no configuration needed
-- **DNS-over-TLS** — encrypted queries on port 853, immune to ISP interception
-- **Automatic fallback** — DoT → plain UDP/53 → system DNS
-- **Poisoning detection** — logs a warning when system DNS and secure DNS return different IPs
-
-To disable (e.g., on a corporate network with internal DNS):
-```toml
-[adaptation]
-secure_dns = false
-```
-
-## Stealth Features
-
-| Parameter | Effect |
-|-----------|--------|
-| `split_jitter` | Randomizes split position by +/- N bytes per connection |
-| `timing_jitter_us` | Random delay between segments (microseconds) |
-| `fake_size_range` | Randomizes fake TLS record size |
-| `randomize_tls_padding` | Adds random TLS padding extension (anti-ML) |
-
-## Building from Source
-
-```bash
-# Requirements: Rust 1.70+
-cargo build --release
-
-# Run tests
-cargo test
-
-# GUI (requires Node.js)
-cd crates/desyncd-gui && cargo tauri dev
+desyncd-cli          Main binary, cold-start, presets
+desyncd-config       TOML config + CLI args
+desyncd-proxy        Multi-protocol proxy (SOCKS5/4/4a, HTTP)
+desyncd-desync       Bypass techniques (Technique trait + registry)
+desyncd-packet       Protocol parsing (TLS/HTTP/QUIC)
+desyncd-strategy     Strategy selection, domain matching (RFC 6125)
+desyncd-adapt        Auto-adaptation, Protocol Morphing, probing, DNS-over-TLS
+desyncd-store        SQLite persistence, confidence scoring
+desyncd-platform     Platform abstraction (firewall, NFQ)
+desyncd-nfq          Linux NFQUEUE handler
+desyncd-gui          Tauri + Svelte desktop GUI
+desyncd-types        Shared types
 ```
 
 ## CLI Reference
@@ -224,45 +211,22 @@ Commands:
   test         Test bypass techniques against domains
   adapt        Auto-discover best strategy and generate config
   show-config  Print effective configuration
+  gui          Launch the GUI application
 
 Options:
-  -m, --mode <MODE>          socks, transparent, nfq
-  -l, --listen <ADDR>        Listen address (default: 127.0.0.1:1080)
-  -c, --config <PATH>        Config file path
-  -s, --strategy <NAME>      Override strategy for all connections
-  -v, --verbose              Increase log verbosity (-v, -vv, -vvv)
+  -m, --mode <MODE>        socks, transparent, nfq
+  -l, --listen <ADDR>      Listen address (default: 127.0.0.1:1080)
+  -c, --config <PATH>      Config file path
+  -s, --strategy <NAME>    Override strategy
+  -v, --verbose            Increase log verbosity
 
-Adapt-specific:
-  -d, --domain <DOMAIN>      Target domain(s), can be repeated
-      --domains-file <PATH>  Read domains from file (one per line)
-      --preset <NAME>        Built-in domain list: russia, china, iran, test
-      --save                 Save discovered strategies to config
+Adapt options:
+  -d, --domain <DOMAIN>    Target domain(s), can be repeated
+      --domains-file <PATH> Read domains from file
+      --preset <NAME>      russia, china, iran, test
+      --morphing           Use Protocol Morphing (DPI classification)
+      --save               Save strategies to config
 ```
-
-## Architecture
-
-```
-desyncd-cli          Main binary, cold-start logic, preset domains
-desyncd-config       TOML config + CLI argument parsing
-desyncd-proxy        Multi-protocol proxy (SOCKS5/4/4a, HTTP), action executor
-desyncd-desync       Bypass techniques (Technique trait + registry)
-desyncd-packet       Protocol parsing (TLS/HTTP/QUIC)
-desyncd-strategy     Strategy selection, domain matching (RFC 6125)
-desyncd-adapt        Auto-adaptation engine, smart prediction, probing, secure DNS
-desyncd-store        SQLite persistence, cross-domain strategy queries
-desyncd-platform     Platform abstraction (firewall, NFQ)
-desyncd-nfq          Linux NFQUEUE handler
-desyncd-gui          Tauri + Svelte desktop GUI
-desyncd-types        Shared types (DesyncAction, SplitPosition, etc.)
-```
-
-### Adding a new technique
-
-1. Create `crates/desyncd-desync/src/my_technique.rs` implementing the `Technique` trait
-2. Add `pub mod my_technique;` to `lib.rs`
-3. Register it in `TechniqueRegistry::default()`
-
-That's it — the strategy engine, probe, and CLI pick it up automatically.
 
 ## License
 
@@ -278,211 +242,157 @@ MIT OR Apache-2.0
 
 Адаптивный инструмент десинхронизации DPI. Автоматически находит и применяет лучшие стратегии обхода блокировок для вашего провайдера.
 
-Объединяет мощь [zapret](https://github.com/bol-van/zapret) с простотой [byedpi](https://github.com/hufrea/byedpi) в одном Rust-бинарнике с автоадаптацией.
+## Установка одной командой
 
-## TL;DR (3 команды и готово)
-
+**macOS / Linux:**
 ```bash
-# 1. Собрать
-cargo build --release
-
-# 2. Найти что работает у вашего провайдера (~1 мин на домен)
-./target/release/desyncd adapt --domain youtube.com --domain rutracker.org --save
-
-# 3. Запустить — конфиг генерируется автоматически
-./target/release/desyncd run
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash
 ```
 
-Настройте SOCKS5 прокси в браузере/системе: `127.0.0.1:1080`. Готово.
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/Maximus002/desyncd/main/install.ps1 | iex
+```
 
-> **Что это делает?** Ваш провайдер использует DPI (глубокий анализ пакетов) для обнаружения и блокировки сайтов, анализируя ваш трафик. desyncd встаёт между вами и интернетом, слегка изменяя пакеты так, что DPI-система не может их распознать — но сервер назначения понимает их отлично.
-
-## Возможности
-
-- **7 техник обхода**: TCP split, фрагментация TLS record, инъекция фейковых пакетов, disorder, манипуляция SNI, трюки с HTTP Host, цепочки техник
-- **Автоадаптация**: автоматически тестирует и находит лучшую стратегию для каждого домена
-- **Безопасный DNS**: автоматический обход DNS-отравления через DNS-over-TLS к Cloudflare (1.1.1.1) и Google (8.8.8.8) — зашифрованные запросы, которые провайдер не может перехватить или подменить
-- **Умное предсказание**: переиспользует найденные стратегии для новых доменов — часто обход за <200мс
-- **Двухфазный холодный старт**: мгновенный доступ в интернет с безопасными дефолтами, пока идёт адаптация
-- **Пакетная обработка**: `--preset russia|china|iran`, `--domains-file`, множественные `--domain`
-- **Автоконфиг**: `adapt --save` генерирует готовый к использованию конфиг
-- **Мультипротокольный прокси**: SOCKS5, SOCKS4/4a, HTTP CONNECT, HTTP forward прокси — автодетект на одном порту
-- **Прозрачный прокси** (Linux): перехват через `iptables REDIRECT` + `SO_ORIGINAL_DST`
-- **Перехват пакетов NFQ** (Linux): на уровне ядра через NFQUEUE
-- **Стелс**: рандомизация позиции разбиения, задержки между сегментами, рандомизация фейковых пакетов, TLS padding (анти-ML)
-- **Правила по доменам**: разные стратегии для разных сайтов с поддержкой wildcard (RFC 6125)
-- **Расширяемая архитектура**: новая техника обхода = один трейт — движок, CLI и probe подхватят автоматически
-- **Деградация уверенности**: стратегии автоматически «портятся» со временем; ненадёжные переоткрываются заново
-- **GUI**: десктопное приложение Tauri + Svelte (Windows, macOS, Linux)
+Установщик проверяет наличие Rust (устанавливает при необходимости), собирает из исходников и добавляет `desyncd` в PATH.
 
 ## Быстрый старт
 
 ```bash
-# Собрать
+# Автоподбор стратегии с классификацией DPI
+desyncd adapt --preset russia --morphing --save
+
+# Запуск прокси
+desyncd run
+```
+
+Настройте SOCKS5 прокси: `127.0.0.1:1080`. Готово.
+
+> **Что это делает?** Ваш провайдер использует DPI для обнаружения и блокировки сайтов. desyncd встаёт между вами и интернетом, изменяя пакеты так, что DPI не может их распознать — но сервер понимает их отлично.
+
+## Новое в 2.0
+
+- **Protocol Morphing** — интеллектуальный классификатор DPI, определяющий тип системы блокировки (ТСПУ и др.) за 5 проб. Используйте с `--morphing`.
+- **Multi-Stream Fragmentation** — разбивает TLS ClientHello на N записей (по умолчанию 3), распределяя SNI между ними. Быстрее и надёжнее однократной фрагментации.
+- **Установщик одной командой** — `curl | bash` для macOS/Linux, PowerShell для Windows. Автоматически ставит Rust.
+- **Исправления багов** — проверки границ в TLS-парсере, валидация длин, логирование ошибок прокси.
+
+## Возможности
+
+- **8 техник обхода**: TCP split, TLS record frag, **multi-stream frag (НОВОЕ)**, fake packet, disorder, SNI manip, HTTP Host, combo
+- **Protocol Morphing**: классифицирует DPI и подбирает оптимальную стратегию
+- **Автоадаптация**: находит лучшую стратегию для каждого домена
+- **Безопасный DNS**: DNS-over-TLS к Cloudflare/Google — зашифрованные запросы
+- **Умное предсказание**: переиспользует стратегии — обход за <200мс
+- **Мультипротокольный прокси**: SOCKS5, SOCKS4/4a, HTTP — автодетект на одном порту
+- **GUI**: десктопное приложение Tauri + Svelte
+
+Подробная документация техник: **[docs/TECHNIQUES.md](docs/TECHNIQUES.md)**
+
+## Установка
+
+### Одной командой (рекомендуется)
+
+**macOS / Linux:**
+```bash
+# Установка / обновление
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash
+
+# Установка + автоадаптация (пресет Россия)
+curl -fsSL https://raw.githubusercontent.com/Maximus002/desyncd/main/install.sh | bash -s -- --adapt
+```
+
+**Windows (PowerShell от администратора):**
+```powershell
+# Установка / обновление
+irm https://raw.githubusercontent.com/Maximus002/desyncd/main/install.ps1 | iex
+
+# Установка + автоадаптация
+.\install.ps1 -Adapt
+```
+
+### Ручная сборка
+
+```bash
+# Требования: Rust 1.70+, git
+git clone https://github.com/Maximus002/desyncd.git
+cd desyncd
 cargo build --release
+./target/release/desyncd --help
+```
 
-# Запустить с дефолтным конфигом (SOCKS5 на 127.0.0.1:1080)
-./target/release/desyncd run
+## Использование
 
-# Протестировать какие техники работают
-./target/release/desyncd test --domain youtube.com --all-techniques
+```bash
+# Тест техник для домена
+desyncd test --domain twitter.com --all-techniques
 
-# Автоподбор стратегий + генерация конфига
-./target/release/desyncd adapt --domain youtube.com --domain rutracker.org --save
+# Автоподбор с Protocol Morphing
+desyncd adapt --domain twitter.com --domain discord.com --morphing --save
 
 # Пакетная адаптация с пресетом
-./target/release/desyncd adapt --preset russia --save
+desyncd adapt --preset russia --morphing --save
 
-# Пакетная адаптация из файла
-./target/release/desyncd adapt --domains-file my_domains.txt --save
-
-# Посмотреть текущий конфиг
-./target/release/desyncd show-config
+# Запуск прокси
+desyncd run
 ```
 
 ### Подключение через прокси
 
-**Системный прокси (macOS):** Системные настройки → Сеть → Wi-Fi → Подробнее → Прокси → SOCKS прокси → `127.0.0.1` порт `1080`
+**macOS:** Системные настройки → Сеть → Wi-Fi → Подробнее → Прокси → SOCKS → `127.0.0.1:1080`
 
-**Браузер (Firefox):** Настройки → Настройки сети → Ручная настройка → SOCKS: `127.0.0.1`, Порт: `1080`, SOCKS v5
+**Firefox:** Настройки → Сеть → Ручная настройка → SOCKS: `127.0.0.1`, Порт: `1080`, SOCKS v5
 
 **Командная строка:**
 ```bash
-curl --proxy socks5h://127.0.0.1:1080 https://youtube.com -I
-# или для всех программ:
+curl --proxy socks5h://127.0.0.1:1080 https://twitter.com -I
 export ALL_PROXY=socks5h://127.0.0.1:1080
 ```
 
-## Режимы работы
+## Техники обхода
 
-| Режим | Платформа | Привилегии | Описание |
-|-------|-----------|------------|----------|
-| `socks` | Все | Нет | SOCKS5/4/4a + HTTP CONNECT + HTTP forward прокси (по умолчанию) |
-| `transparent` | Linux | root | Перехват через `iptables REDIRECT` + `SO_ORIGINAL_DST` |
-| `nfq` | Linux | root/CAP_NET_ADMIN | Перехват пакетов через NFQUEUE |
+| Техника | Уровень | vs ТСПУ | Описание |
+|---------|---------|---------|----------|
+| `tcp_split` | TCP | - | Разбивает TCP-сегмент в позиции SNI |
+| `tls_record_frag` | TLS | **OK** | Фрагментирует ClientHello на 2 TLS-записи |
+| `multi_stream_frag` | TLS | **OK** | Фрагментирует на N записей (НОВОЕ) |
+| `fake_packet` | TCP | - | Инъекция фейковой TLS-записи |
+| `disorder` | TCP | - | Отправка сегментов в обратном порядке |
+| `sni_manip` | TLS | - | Изменение SNI: регистр, удаление |
+| `http_host` | HTTP | - | Изменение HTTP Host |
+| `combo` | Цепочка | Зависит | Цепочка техник |
 
-> **Примечание:** В режиме `socks` прокси автоматически определяет протокол клиента (SOCKS5, SOCKS4/4a, HTTP CONNECT, plain HTTP) на одном порту — настройка не нужна.
+Подробная документация с диаграммами и результатами тестов: **[docs/TECHNIQUES.md](docs/TECHNIQUES.md)**
 
 ## Конфигурация
 
-`adapt --save` автоматически генерирует конфиг в `~/.config/desyncd/config.toml`. Можно создать и вручную:
+`adapt --save` генерирует `~/.config/desyncd/config.toml`:
 
 ```toml
 [general]
 mode = "socks"
-log_level = "info"
 
 [proxy]
 listen = "127.0.0.1:1080"
 
 [adaptation]
 enabled = true
-test_interval_secs = 21600  # 6 часов
-test_domains = ["youtube.com", "rutracker.org"]
-secure_dns = true  # обход DNS-отравления через Cloudflare/Google (по умолчанию: true)
+test_interval_secs = 21600
+test_domains = ["twitter.com", "discord.com"]
+secure_dns = true
 
 [stealth]
-split_jitter = 4              # рандомизация позиции разбиения +/- N байт
-timing_jitter_us = 500        # задержка между сегментами (микросекунды)
-randomize_tls_padding = true  # случайный TLS padding (анти-ML)
-fake_size_range = [48, 200]   # рандомизация размера фейковых пакетов
+split_jitter = 4
+timing_jitter_us = 500
 
-# --- Стратегии ---
 [strategies.default_tls]
 techniques = [
-    { name = "tcp_split", split_position = "Sni" },
-]
-
-[strategies.aggressive]
-techniques = [
     { name = "tls_record_frag", split_position = "Sni" },
-    { name = "tcp_split", split_position = { SniOffset = -2 } },
 ]
-
-# --- Правила ---
-[[rules]]
-domains = ["*.youtube.com", "*.googlevideo.com"]
-strategy = "aggressive"
-priority = 10
 
 [[rules]]
 domains = ["*"]
 strategy = "default_tls"
-priority = 0
-```
-
-## Техники обхода
-
-| Техника | Уровень | Описание |
-|---------|---------|----------|
-| `tcp_split` | TCP | Разбивает TCP-сегмент в позиции SNI на 2+ части |
-| `tls_record_frag` | TLS | Фрагментирует ClientHello на несколько TLS-записей |
-| `fake_packet` | TCP | Инъектирует фейковую TLS-запись перед настоящим ClientHello |
-| `disorder` | TCP | Отправляет сегменты в обратном порядке |
-| `sni_manip` | TLS | Изменяет SNI: смешанный регистр, удаление, дополнение |
-| `http_host` | HTTP | Изменяет HTTP Host: смешанный регистр, лишние пробелы, табы |
-| combo | Цепочка | Применяет несколько техник последовательно |
-
-## Автоадаптация
-
-```bash
-# Найти лучшую стратегию для доменов, сгенерировать конфиг
-desyncd adapt --domain youtube.com --domain discord.com --save
-
-# Использовать пресет для региона
-desyncd adapt --preset russia --save    # youtube, rutracker, discord, ...
-desyncd adapt --preset china --save     # google, wikipedia, twitter, ...
-
-# Загрузить домены из файла (один на строку)
-desyncd adapt --domains-file blocked.txt --save
-
-# Затем просто запустить:
-desyncd run
-```
-
-Алгоритм: тест базовой связи → умное предсказание (переиспользование известных стратегий) → перебор всех техник → вариации позиции разбиения → комбинирование победителей → оценка и сохранение.
-
-**Умное предсказание:** Когда рабочая стратегия найдена для одного домена, она автоматически пробуется для новых. Поскольку провайдеры обычно используют одинаковые правила DPI, это часто работает — время обнаружения сокращается с ~60с до <200мс.
-
-**Деградация уверенности:** Стратегии имеют оценку уверенности с полупериодом 7 дней. Часто ломающиеся стратегии автоматически понижаются и переоткрываются, обеспечивая адаптацию к изменениям провайдера.
-
-## Безопасный DNS
-
-Многие провайдеры блокируют сайты не только через DPI, но и через **DNS-отравление** — возвращают поддельные IP-адреса для заблокированных доменов. Некоторые провайдеры идут дальше и перехватывают весь UDP-трафик на порту 53, подменяя ответы даже при запросах к публичным DNS (8.8.8.8).
-
-desyncd решает это через **DNS-over-TLS** (DoT, RFC 7858) — отправляя зашифрованные DNS-запросы к Cloudflare и Google на порт 853. Провайдер не может просмотреть или модифицировать зашифрованный TLS-трафик.
-
-- **Включён по умолчанию** — настройка не нужна
-- **DNS-over-TLS** — зашифрованные запросы на порту 853, неуязвимы для перехвата
-- **Автоматический fallback** — DoT → UDP/53 → системный DNS
-- **Обнаружение отравления** — логирует предупреждение, когда системный и безопасный DNS возвращают разные IP
-
-Чтобы отключить (например, в корпоративной сети с внутренним DNS):
-```toml
-[adaptation]
-secure_dns = false
-```
-
-## Стелс-функции
-
-| Параметр | Эффект |
-|----------|--------|
-| `split_jitter` | Рандомизирует позицию разбиения на +/- N байт для каждого соединения |
-| `timing_jitter_us` | Случайная задержка между сегментами (микросекунды) |
-| `fake_size_range` | Рандомизирует размер фейковых TLS-записей |
-| `randomize_tls_padding` | Добавляет случайный TLS padding (анти-ML) |
-
-## Сборка из исходников
-
-```bash
-# Требования: Rust 1.70+
-cargo build --release
-
-# Запуск тестов
-cargo test
-
-# GUI (требует Node.js)
-cd crates/desyncd-gui && cargo tauri dev
 ```
 
 ## Справка по CLI
@@ -492,22 +402,23 @@ desyncd [ОПЦИИ] <КОМАНДА>
 
 Команды:
   run          Запуск прокси (по умолчанию)
-  test         Тест техник обхода для доменов
-  adapt        Автоподбор стратегии и генерация конфига
-  show-config  Показать текущую конфигурацию
+  test         Тест техник обхода
+  adapt        Автоподбор стратегии
+  show-config  Показать конфигурацию
+  gui          Запуск GUI
 
 Опции:
-  -m, --mode <РЕЖИМ>        socks, transparent, nfq
-  -l, --listen <АДРЕС>      Адрес прослушивания (по умолчанию: 127.0.0.1:1080)
-  -c, --config <ПУТЬ>       Путь к конфигу
-  -s, --strategy <ИМЯ>      Принудительная стратегия для всех соединений
-  -v, --verbose              Увеличить детальность логов (-v, -vv, -vvv)
+  -m, --mode <РЕЖИМ>       socks, transparent, nfq
+  -l, --listen <АДРЕС>     Адрес (по умолчанию: 127.0.0.1:1080)
+  -c, --config <ПУТЬ>      Путь к конфигу
+  -v, --verbose             Детальность логов
 
 Для adapt:
-  -d, --domain <ДОМЕН>      Целевые домены, можно повторять
-      --domains-file <ПУТЬ>  Читать домены из файла (один на строку)
-      --preset <ИМЯ>         Встроенный список доменов: russia, china, iran, test
-      --save                 Сохранить найденные стратегии в конфиг
+  -d, --domain <ДОМЕН>     Целевые домены
+      --domains-file <ПУТЬ> Домены из файла
+      --preset <ИМЯ>       russia, china, iran, test
+      --morphing            Protocol Morphing (классификация DPI)
+      --save                Сохранить в конфиг
 ```
 
 ## Лицензия
