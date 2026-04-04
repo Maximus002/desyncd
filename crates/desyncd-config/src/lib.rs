@@ -70,6 +70,9 @@ pub enum Command {
         /// Save discovered strategies and generate config.
         #[arg(long)]
         save: bool,
+        /// Use protocol morphing (classify DPI first, then targeted search).
+        #[arg(long)]
+        morphing: bool,
     },
     /// Print effective configuration.
     ShowConfig,

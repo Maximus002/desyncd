@@ -79,6 +79,10 @@ pub async fn handle_client(
         }
         ATYP_DOMAIN => {
             let len = client.read_u8().await? as usize;
+            if len == 0 {
+                send_reply(&mut client, REPLY_GENERAL_FAILURE, atyp).await?;
+                anyhow::bail!("SOCKS5 domain length is zero");
+            }
             let mut domain_bytes = vec![0u8; len];
             client.read_exact(&mut domain_bytes).await?;
             let port = client.read_u16().await?;

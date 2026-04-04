@@ -168,6 +168,7 @@ pub async fn find_best_strategy(
     let techniques = [
         ("tcp_split", SplitPosition::Sni),
         ("tls_record_frag", SplitPosition::Sni),
+        ("multi_stream_frag", SplitPosition::Sni),
         ("disorder", SplitPosition::Sni),
         ("sni_manip", SplitPosition::Sni),
     ];
@@ -485,7 +486,7 @@ pub fn recommended_stealth() -> StealthConfig {
 /// Compute a score for a probe result.
 ///
 /// `score = success * 100 - latency_ms * 0.01`
-fn compute_score(result: &ProbeResult) -> f64 {
+pub fn compute_score(result: &ProbeResult) -> f64 {
     if !result.success {
         return 0.0;
     }

@@ -1,6 +1,7 @@
 pub mod technique;
 pub mod tcp_split;
 pub mod tls_record_frag;
+pub mod multi_stream_frag;
 pub mod fake_packet;
 pub mod disorder;
 pub mod sni_manip;

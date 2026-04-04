@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
             domains_file,
             preset,
             save,
+            morphing,
         } => {
             let mut all_domains = domain;
 
@@ -81,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
-            adapt_domains(config, all_domains, save).await
+            adapt_domains(config, all_domains, save, morphing).await
         }
         Command::ShowConfig => {
             show_config(&config);
@@ -300,7 +301,7 @@ async fn test_domains(
     Ok(())
 }
 
-async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> anyhow::Result<()> {
+async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool, morphing: bool) -> anyhow::Result<()> {
     if domains.is_empty() {
         anyhow::bail!("no domains specified. Usage: desyncd adapt --domain youtube.com");
     }
@@ -322,9 +323,17 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
     let mut discovered: Vec<(String, desyncd_strategy::Strategy)> = Vec::new();
 
     for domain in &domains {
-        println!("\n=== Adapting: {} ===\n", domain);
+        if morphing {
+            println!("\n=== Morphing: {} ===\n", domain);
+        } else {
+            println!("\n=== Adapting: {} ===\n", domain);
+        }
 
-        let result = desyncd_adapt::search::find_best_strategy(&engine, domain).await?;
+        let result = if morphing {
+            desyncd_adapt::morphing::morphing_search(&engine, domain).await?
+        } else {
+            desyncd_adapt::search::find_best_strategy(&engine, domain).await?
+        };
 
         println!(
             "\nProbes ({} total):",
@@ -350,6 +359,7 @@ async fn adapt_domains(config: AppConfig, domains: Vec<String>, save: bool) -> a
             let mut tags = Vec::new();
             if result.was_fast_guess { tags.push("FAST GUESS"); }
             if result.stealth_used { tags.push("STEALTH"); }
+            if morphing { tags.push("MORPHING"); }
             let tag_str = if tags.is_empty() {
                 String::new()
             } else {

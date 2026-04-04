@@ -46,6 +46,9 @@ pub fn add_tls_padding(payload: &[u8], pad_len: usize) -> Option<Vec<u8>> {
     }
     let session_id_len = payload[pos] as usize;
     pos += 1 + session_id_len;
+    if pos > payload.len() {
+        return None;
+    }
 
     // Cipher suites
     if pos + 2 > payload.len() {
@@ -53,6 +56,9 @@ pub fn add_tls_padding(payload: &[u8], pad_len: usize) -> Option<Vec<u8>> {
     }
     let cipher_len = u16::from_be_bytes([payload[pos], payload[pos + 1]]) as usize;
     pos += 2 + cipher_len;
+    if pos > payload.len() {
+        return None;
+    }
 
     // Compression methods
     if pos >= payload.len() {
@@ -60,6 +66,9 @@ pub fn add_tls_padding(payload: &[u8], pad_len: usize) -> Option<Vec<u8>> {
     }
     let comp_len = payload[pos] as usize;
     pos += 1 + comp_len;
+    if pos > payload.len() {
+        return None;
+    }
 
     // Extensions length field position
     if pos + 2 > payload.len() {
@@ -113,6 +122,9 @@ pub fn add_tls_padding(payload: &[u8], pad_len: usize) -> Option<Vec<u8>> {
         | ((result[7] as usize) << 8)
         | (result[8] as usize);
     let new_hs_len = orig_hs_len + pad_ext_total;
+    if new_hs_len > 0xFFFFFF {
+        return None;
+    }
     result[6] = ((new_hs_len >> 16) & 0xFF) as u8;
     result[7] = ((new_hs_len >> 8) & 0xFF) as u8;
     result[8] = (new_hs_len & 0xFF) as u8;

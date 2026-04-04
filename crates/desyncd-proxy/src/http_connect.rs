@@ -214,9 +214,13 @@ async fn handle_forward_proxy(
             let n = match tokio::io::AsyncReadExt::read(&mut client_reader, &mut buf).await {
                 Ok(0) => break,
                 Ok(n) => n,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::trace!(error = %e, "forward proxy: client read error");
+                    break;
+                }
             };
-            if tokio::io::AsyncWriteExt::write_all(&mut upstream_writer, &buf[..n]).await.is_err() {
+            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream_writer, &buf[..n]).await {
+                tracing::trace!(error = %e, "forward proxy: upstream write error");
                 break;
             }
         }
@@ -230,9 +234,13 @@ async fn handle_forward_proxy(
             let n = match tokio::io::AsyncReadExt::read(&mut upstream_reader, &mut buf).await {
                 Ok(0) => break,
                 Ok(n) => n,
-                Err(_) => break,
+                Err(e) => {
+                    tracing::trace!(error = %e, "forward proxy: upstream read error");
+                    break;
+                }
             };
-            if tokio::io::AsyncWriteExt::write_all(&mut client_writer, &buf[..n]).await.is_err() {
+            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut client_writer, &buf[..n]).await {
+                tracing::trace!(error = %e, "forward proxy: client write error");
                 break;
             }
         }

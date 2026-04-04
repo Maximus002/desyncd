@@ -222,8 +222,8 @@ async fn query_on_pooled_conn(
     tokio::time::timeout(DNS_TIMEOUT, stream.read_exact(&mut len_buf)).await??;
     let resp_len = u16::from_be_bytes(len_buf) as usize;
 
-    if resp_len > 65535 {
-        anyhow::bail!("DNS response too large: {}", resp_len);
+    if resp_len == 0 {
+        anyhow::bail!("DNS response empty");
     }
 
     let mut resp_buf = vec![0u8; resp_len];

@@ -145,6 +145,7 @@ impl Default for TechniqueRegistry {
         let mut reg = Self::new();
         reg.register(Box::new(super::tcp_split::TcpSplitTechnique));
         reg.register(Box::new(super::tls_record_frag::TlsRecordFragTechnique));
+        reg.register(Box::new(super::multi_stream_frag::MultiStreamFragTechnique));
         reg.register(Box::new(super::fake_packet::FakePacketTechnique));
         reg.register(Box::new(super::disorder::DisorderTechnique));
         reg.register(Box::new(super::sni_manip::SniManipTechnique));
@@ -158,6 +159,7 @@ pub fn available_techniques() -> &'static [&'static str] {
     &[
         "tcp_split",
         "tls_record_frag",
+        "multi_stream_frag",
         "fake_packet",
         "disorder",
         "sni_manip",
