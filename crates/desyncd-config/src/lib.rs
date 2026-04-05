@@ -140,7 +140,18 @@ fn default_test_interval() -> u64 {
 }
 
 fn default_db_path() -> String {
-    "~/.local/share/desyncd/state.db".into()
+    // On Windows the default lives under %APPDATA% (=%USERPROFILE%\AppData\Roaming),
+    // matching where `dirs_path("data", ...)` resolves to. On Unix we keep the
+    // XDG-style ~/.local/share path. The `~` prefix is expanded at load time
+    // by `expand_tilde`, which uses USERPROFILE on Windows and HOME elsewhere.
+    #[cfg(windows)]
+    {
+        "~/AppData/Roaming/desyncd/state.db".into()
+    }
+    #[cfg(not(windows))]
+    {
+        "~/.local/share/desyncd/state.db".into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

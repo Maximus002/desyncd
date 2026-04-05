@@ -485,20 +485,37 @@ fn resolve_config_path() -> PathBuf {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let config_dir: Option<PathBuf> = None;
 
+    // Fallback chain: platform-specific home dir → current directory.
+    // On Windows prefer USERPROFILE (HOME is typically unset).
     config_dir
-        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config/desyncd")))
+        .or_else(|| home_dir().map(|h| h.join(".config/desyncd")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("config.toml")
 }
 
+/// Return the user's home directory. Uses `USERPROFILE` on Windows
+/// (where `HOME` is typically unset) and `HOME` elsewhere.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var("USERPROFILE").ok().map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME").ok().map(PathBuf::from)
+    }
+}
+
+/// Expand a leading `~` or `~/...` to the user's home directory.
+/// Returns the unchanged path if expansion fails (e.g. no home dir known).
 fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home);
+        if let Some(home) = home_dir() {
+            return home;
         }
     } else if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
+        if let Some(home) = home_dir() {
+            return home.join(stripped);
         }
     }
     PathBuf::from(path)

@@ -82,7 +82,16 @@ fn default_timeout() -> u64 {
     10
 }
 fn default_db_path() -> String {
-    "~/.local/share/desyncd/state.db".into()
+    // Mirror desyncd-config::default_db_path — must stay in sync.
+    // Expanded by `expand_tilde` which picks USERPROFILE on Windows.
+    #[cfg(windows)]
+    {
+        "~/AppData/Roaming/desyncd/state.db".into()
+    }
+    #[cfg(not(windows))]
+    {
+        "~/.local/share/desyncd/state.db".into()
+    }
 }
 
 /// The adaptation engine.

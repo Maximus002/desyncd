@@ -146,9 +146,12 @@ async fn probe_inner(
     let client_hello = build_probe_client_hello(domain);
 
     if let Some(strategy) = strategy {
-        let ctx = PayloadContext::new(client_hello.clone());
+        // Move `client_hello` into the context so we don't clone it just to
+        // pass the original bytes to `execute_action` — `ctx.payload` is the
+        // same slice and `execute_action` only needs a `&[u8]`.
+        let ctx = PayloadContext::new(client_hello);
         let action = strategy.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
-        desyncd_proxy::action::execute_action(&action, &client_hello, &mut stream, None).await?;
+        desyncd_proxy::action::execute_action(&action, &ctx.payload, &mut stream, None).await?;
     } else {
         // No strategy — baseline test.
         stream.write_all(&client_hello).await?;

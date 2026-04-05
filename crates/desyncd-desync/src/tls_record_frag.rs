@@ -85,6 +85,15 @@ pub fn apply(ctx: &PayloadContext, split_pos: &SplitPosition) -> Result<DesyncAc
         ));
     }
 
+    // Need at least 2 bytes of record payload to split into two non-empty
+    // fragments. Anything smaller cannot be fragmented — reject explicitly
+    // because the clamp below would panic with min > max otherwise.
+    if record_data_len < 2 {
+        return Err(desyncd_types::Error::NotApplicable(
+            "TLS record too small to fragment (need >= 2 bytes of payload)".into(),
+        ));
+    }
+
     // The split position is relative to the full payload (including the 5-byte header).
     // We need to translate it to a position within the record data.
     let abs_offset = ctx.resolve_split_position(split_pos).ok_or_else(|| {
@@ -100,7 +109,8 @@ pub fn apply(ctx: &PayloadContext, split_pos: &SplitPosition) -> Result<DesyncAc
         1 // Split at minimum 1 byte into the record.
     };
 
-    let data_offset = data_offset.clamp(1, record_data_len.saturating_sub(1));
+    // record_data_len >= 2 is guaranteed above, so max = record_data_len - 1 >= 1.
+    let data_offset = data_offset.clamp(1, record_data_len - 1);
 
     let first_data = &record_data[..data_offset];
     let second_data = &record_data[data_offset..record_data_len];
@@ -201,5 +211,41 @@ mod tests {
             },
         };
         assert!(apply(&ctx, &SplitPosition::Sni).is_err());
+    }
+
+    /// Regression: a crafted TLS record declaring `record_data_len < 2`
+    /// previously panicked inside `clamp(1, 0)`. We must reject it as
+    /// NotApplicable instead.
+    #[test]
+    fn test_tiny_tls_record_does_not_panic() {
+        // TLS record header (5 bytes): type=0x16, version=0x0303, len=0x0001
+        // followed by a single data byte. record_data_len = 1, too small to fragment.
+        let payload = vec![0x16, 0x03, 0x03, 0x00, 0x01, 0xAA];
+        let ctx = PayloadContext {
+            payload,
+            protocol: AppProtocol::TlsClientHello {
+                sni: Some("example.com".into()),
+                sni_offset: 5,
+                sni_len: 0,
+            },
+        };
+        let result = apply(&ctx, &SplitPosition::Sni);
+        assert!(result.is_err(), "tiny record should be NotApplicable, not panic");
+    }
+
+    /// Same but with zero-length record.
+    #[test]
+    fn test_zero_length_tls_record_does_not_panic() {
+        let payload = vec![0x16, 0x03, 0x03, 0x00, 0x00];
+        let ctx = PayloadContext {
+            payload,
+            protocol: AppProtocol::TlsClientHello {
+                sni: Some("example.com".into()),
+                sni_offset: 5,
+                sni_len: 0,
+            },
+        };
+        let result = apply(&ctx, &SplitPosition::Sni);
+        assert!(result.is_err(), "empty record should be NotApplicable, not panic");
     }
 }

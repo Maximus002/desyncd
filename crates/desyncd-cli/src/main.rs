@@ -690,10 +690,23 @@ fn launch_gui() -> anyhow::Result<()> {
 }
 
 /// Expand `~` in a path to the user's home directory.
+///
+/// Uses `USERPROFILE` on Windows (where `HOME` is typically unset)
+/// and `HOME` elsewhere.
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
+    let home = {
+        #[cfg(windows)]
+        { std::env::var("USERPROFILE").ok() }
+        #[cfg(not(windows))]
+        { std::env::var("HOME").ok() }
+    };
+    if path == "~" {
+        if let Some(h) = home {
+            return PathBuf::from(h);
+        }
+    } else if let Some(stripped) = path.strip_prefix("~/") {
+        if let Some(h) = home {
+            return PathBuf::from(h).join(stripped);
         }
     }
     PathBuf::from(path)

@@ -160,7 +160,19 @@ fn compute_checksum(data: &[u8]) -> u16 {
 }
 
 /// Compute TCP checksum including pseudo-header.
+///
+/// Expects `packet` to be a full IPv4 + TCP packet with at least 20 bytes
+/// of IP header (which contains src/dst IPs at offsets 12..20) followed by
+/// the TCP segment starting at `ip_header_len`. Callers currently guarantee
+/// this via `rebuild_packet`, but we bounds-check defensively so a truncated
+/// packet returns `0` instead of panicking.
 fn compute_tcp_checksum(packet: &[u8], ip_header_len: usize) -> u16 {
+    // Need: IP header (≥20 bytes) for src/dst IPs, plus at least 20 bytes
+    // of TCP header starting at `ip_header_len`.
+    if packet.len() < 20 || packet.len() < ip_header_len + 20 {
+        return 0;
+    }
+
     let tcp_start = ip_header_len;
     let tcp_len = packet.len() - tcp_start;
 

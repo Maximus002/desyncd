@@ -23,5 +23,8 @@ async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 fastrand = "2"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-tokio-rustls = "0.26"
+# IMPORTANT: disable default features to avoid pulling in aws-lc-rs (a C library
+# that requires the Windows SDK on Windows cross-compiles). We use ring via
+# the rustls dependency above.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
 webpki-roots = "0.26"
