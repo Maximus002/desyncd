@@ -4,12 +4,13 @@
 //! - `CONNECT host:port HTTP/1.x` — tunnel mode for HTTPS
 //! - `GET/POST/... http://host/path HTTP/1.x` — forward proxy for plain HTTP
 
-use std::net::SocketAddr;
+use std::sync::Arc;
 
+use desyncd_dns::DnsCache;
 use desyncd_strategy::Selector;
 use desyncd_types::StealthConfig;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::relay;
@@ -25,6 +26,7 @@ pub async fn handle_http_proxy(
     first_bytes: &[u8],
     selector: &Selector,
     stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     // Reconstruct the full request line from first_bytes + remainder.
     let mut reader = BufReader::new(&mut client);
@@ -66,7 +68,7 @@ pub async fn handle_http_proxy(
             }
         }
 
-        handle_connect_tunnel(client, peer_addr, parts[1], selector, stealth).await
+        handle_connect_tunnel(client, peer_addr, parts[1], selector, stealth, dns_cache).await
     } else {
         // Forward proxy for plain HTTP (GET, POST, etc.)
         // Collect remaining headers.
@@ -100,7 +102,7 @@ pub async fn handle_http_proxy(
             }
         }
 
-        handle_forward_proxy(client, peer_addr, &method, parts[1], parts[2], &headers, selector, stealth).await
+        handle_forward_proxy(client, peer_addr, &method, parts[1], parts[2], &headers, selector, stealth, dns_cache).await
     }
 }
 
@@ -111,19 +113,20 @@ async fn handle_connect_tunnel(
     target: &str,
     selector: &Selector,
     stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     let (host, port) = parse_host_port(target)?;
 
     info!(%peer_addr, %host, port, "HTTP CONNECT");
 
-    // Resolve hostname, preferring IPv4 over IPv6.
-    let addr_str = format!("{}:{}", host, port);
-    let resolved = resolve_prefer_ipv4(&addr_str).await?;
+    // Resolve hostname through the shared DNS cache (DoT → UDP → system,
+    // then cached for `DnsCache::ttl`).
+    let resolved = dns_cache.resolve(&host, port).await?;
 
     let upstream = match TcpStream::connect(resolved).await {
         Ok(s) => s,
         Err(e) => {
-            warn!(%addr_str, error = %e, "failed to connect to target");
+            warn!(%host, port, error = %e, "failed to connect to target");
             client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
             return Err(e.into());
         }
@@ -151,6 +154,7 @@ async fn handle_forward_proxy(
     headers: &[String],
     _selector: &Selector,
     _stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     // Parse the absolute URL: http://host[:port]/path
     // Note: desync is not applied for plain HTTP — DPI bypass is only
@@ -159,12 +163,11 @@ async fn handle_forward_proxy(
 
     info!(%peer_addr, %host, port, %path, %method, "HTTP forward proxy");
 
-    let addr_str = format!("{}:{}", host, port);
-    let resolved = resolve_prefer_ipv4(&addr_str).await?;
+    let resolved = dns_cache.resolve(&host, port).await?;
     let mut upstream = match TcpStream::connect(resolved).await {
         Ok(s) => s,
         Err(e) => {
-            warn!(%addr_str, error = %e, "failed to connect to target");
+            warn!(%host, port, error = %e, "failed to connect to target");
             client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
             return Err(e.into());
         }
@@ -334,17 +337,6 @@ fn parse_absolute_url(url: &str) -> anyhow::Result<(String, u16, String)> {
     };
 
     Ok((host, port, path.to_string()))
-}
-
-/// Resolve a hostname, preferring IPv4 addresses over IPv6.
-async fn resolve_prefer_ipv4(addr_str: &str) -> anyhow::Result<SocketAddr> {
-    let addrs: Vec<SocketAddr> = lookup_host(addr_str).await?.collect();
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", addr_str))
 }
 
 // Keep the old function name as a public alias for backwards compat.

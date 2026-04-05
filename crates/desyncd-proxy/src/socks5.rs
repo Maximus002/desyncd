@@ -3,13 +3,23 @@
 //! Implements the SOCKS5 handshake (RFC 1928) and SOCKS4/4a for the
 //! CONNECT command. After the handshake, the connection is passed to
 //! the relay module which applies DPI bypass techniques.
+//!
+//! # Hot-path notes
+//!
+//! The SOCKS5 handshake is on every proxy connection, so we go out of our
+//! way to avoid per-byte reads: each logical unit is read with a single
+//! `read_exact` call. A naive implementation has ~8 `read_u8` await points
+//! which is ~8 scheduler trips + 8 syscalls; byedpi makes 1 recv. We merge
+//! the fixed-length header reads into bulk `[u8; N]` buffers to match that.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::sync::Arc;
 
+use desyncd_dns::DnsCache;
 use desyncd_strategy::Selector;
 use desyncd_types::StealthConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::relay;
@@ -32,16 +42,22 @@ pub async fn handle_client(
     peer_addr: SocketAddr,
     selector: &Selector,
     stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     debug!(%peer_addr, "new SOCKS5 connection");
 
     // --- Phase 1: Authentication negotiation ---
-    let version = client.read_u8().await?;
-    if version != SOCKS_VERSION {
-        anyhow::bail!("unsupported SOCKS version: {}", version);
+    //
+    // Wire format: VER(1) NMETHODS(1) METHODS(NMETHODS)
+    // We read VER+NMETHODS in a single bulk read, then METHODS in a second
+    // read. That's 2 syscalls instead of 2 read_u8 + 1 read_exact = 3.
+    let mut hdr = [0u8; 2];
+    client.read_exact(&mut hdr).await?;
+    if hdr[0] != SOCKS_VERSION {
+        anyhow::bail!("unsupported SOCKS version: {}", hdr[0]);
     }
+    let nmethods = hdr[1] as usize;
 
-    let nmethods = client.read_u8().await? as usize;
     // RFC 1928: NMETHODS is a u8, so max 255 — stack buffer avoids heap alloc.
     let mut methods = [0u8; 255];
     client.read_exact(&mut methods[..nmethods]).await?;
@@ -55,14 +71,18 @@ pub async fn handle_client(
     client.write_all(&[SOCKS_VERSION, AUTH_NONE]).await?;
 
     // --- Phase 2: Connection request ---
-    let ver = client.read_u8().await?;
-    if ver != SOCKS_VERSION {
-        anyhow::bail!("bad version in request: {}", ver);
+    //
+    // Wire format: VER(1) CMD(1) RSV(1) ATYP(1) DST.ADDR(var) DST.PORT(2)
+    // We read the fixed 4-byte header in a single bulk call instead of
+    // four read_u8 awaits.
+    let mut req_hdr = [0u8; 4];
+    client.read_exact(&mut req_hdr).await?;
+    if req_hdr[0] != SOCKS_VERSION {
+        anyhow::bail!("bad version in request: {}", req_hdr[0]);
     }
-
-    let cmd = client.read_u8().await?;
-    let _rsv = client.read_u8().await?;
-    let atyp = client.read_u8().await?;
+    let cmd = req_hdr[1];
+    // req_hdr[2] is RSV, ignored
+    let atyp = req_hdr[3];
 
     if cmd != CMD_CONNECT {
         send_reply(&mut client, REPLY_CMD_NOT_SUPPORTED, atyp).await?;
@@ -70,38 +90,57 @@ pub async fn handle_client(
     }
 
     // Parse target address.
+    //
+    // For each address family we bulk-read the addr + port together (no
+    // separate read_u16 call for the port). The Domain branch still needs
+    // a one-byte read for the length prefix, but everything after that is
+    // one bulk read.
     let (target_addr, domain) = match atyp {
         ATYP_IPV4 => {
-            let mut ip = [0u8; 4];
-            client.read_exact(&mut ip).await?;
-            let port = client.read_u16().await?;
-            let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port));
+            // 4 bytes IP + 2 bytes port = 6 bytes, one read.
+            let mut ip_port = [0u8; 6];
+            client.read_exact(&mut ip_port).await?;
+            let ip = Ipv4Addr::new(ip_port[0], ip_port[1], ip_port[2], ip_port[3]);
+            let port = u16::from_be_bytes([ip_port[4], ip_port[5]]);
+            let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
             (addr, None)
         }
         ATYP_DOMAIN => {
-            let len = client.read_u8().await? as usize;
+            // One byte length, then domain + 2-byte port in a single read.
+            let mut len_buf = [0u8; 1];
+            client.read_exact(&mut len_buf).await?;
+            let len = len_buf[0] as usize;
             if len == 0 {
                 send_reply(&mut client, REPLY_GENERAL_FAILURE, atyp).await?;
                 anyhow::bail!("SOCKS5 domain length is zero");
             }
-            // RFC 1928: domain length is u8, max 255 — stack buffer avoids heap alloc.
-            let mut domain_buf = [0u8; 255];
-            client.read_exact(&mut domain_buf[..len]).await?;
-            let port = client.read_u16().await?;
-            let domain = std::str::from_utf8(&domain_buf[..len])
+
+            // RFC 1928: max domain length is 255, so +2 for port fits in 257.
+            let mut tail = [0u8; 257];
+            client.read_exact(&mut tail[..len + 2]).await?;
+
+            let domain_bytes = &tail[..len];
+            let domain = std::str::from_utf8(domain_bytes)
                 .map_err(|e| anyhow::anyhow!("SOCKS5 domain is not valid UTF-8: {}", e))?
                 .to_string();
+            let port = u16::from_be_bytes([tail[len], tail[len + 1]]);
 
-            // Resolve domain, preferring IPv4, without collecting into a Vec.
-            let addr = resolve_preferring_v4(&domain, port).await?;
+            // Hot-path DNS: look the domain up through the TTL cache.
+            // First hit per (domain,port) goes to DoT+system resolver;
+            // subsequent hits return in microseconds.
+            let addr = dns_cache.resolve(&domain, port).await?;
 
             (addr, Some(domain))
         }
         ATYP_IPV6 => {
-            let mut ip = [0u8; 16];
-            client.read_exact(&mut ip).await?;
-            let port = client.read_u16().await?;
-            let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::from(ip), port, 0, 0));
+            // 16 bytes IP + 2 bytes port = 18 bytes, one read.
+            let mut ip_port = [0u8; 18];
+            client.read_exact(&mut ip_port).await?;
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&ip_port[..16]);
+            let ip = Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be_bytes([ip_port[16], ip_port[17]]);
+            let addr = SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0));
             (addr, None)
         }
         _ => {
@@ -161,27 +200,6 @@ async fn send_reply(client: &mut TcpStream, reply: u8, atyp: u8) -> anyhow::Resu
     Ok(())
 }
 
-/// Resolve a domain to a SocketAddr, preferring IPv4, without collecting into a Vec.
-///
-/// This is a hot-path helper: on every SOCKS5/4a connection with a domain target
-/// we need to look up the address. The previous implementation called
-/// `format!("{}:{}", domain, port)` to build a &str, then `.collect::<Vec>()`ed the
-/// iterator, then searched it twice (once for v4, once for any). We now use the
-/// tuple form of `lookup_host` (no format!) and short-circuit on the first v4.
-async fn resolve_preferring_v4(domain: &str, port: u16) -> anyhow::Result<SocketAddr> {
-    let mut first: Option<SocketAddr> = None;
-    let iter = lookup_host((domain, port)).await?;
-    for a in iter {
-        if a.is_ipv4() {
-            return Ok(a);
-        }
-        if first.is_none() {
-            first = Some(a);
-        }
-    }
-    first.ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))
-}
-
 /// Handle a SOCKS4/4a client connection.
 ///
 /// SOCKS4 format:
@@ -194,29 +212,29 @@ pub async fn handle_socks4(
     peer_addr: SocketAddr,
     selector: &Selector,
     stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     debug!(%peer_addr, "new SOCKS4 connection");
 
-    // Read version byte (already peeked as 0x04).
-    let version = client.read_u8().await?;
-    if version != 0x04 {
-        anyhow::bail!("expected SOCKS4, got version: {}", version);
+    // Fixed 8-byte header: VER(1) CMD(1) DSTPORT(2) DSTIP(4). Bulk read.
+    let mut hdr = [0u8; 8];
+    client.read_exact(&mut hdr).await?;
+    if hdr[0] != 0x04 {
+        anyhow::bail!("expected SOCKS4, got version: {}", hdr[0]);
     }
-
-    let cmd = client.read_u8().await?;
+    let cmd = hdr[1];
     if cmd != 0x01 {
         // Only CONNECT (0x01) is supported, not BIND (0x02).
         let reply = [0x00, 0x5B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // rejected
         client.write_all(&reply).await?;
         anyhow::bail!("SOCKS4 unsupported command: {}", cmd);
     }
-
-    let port = client.read_u16().await?;
-
-    let mut ip_bytes = [0u8; 4];
-    client.read_exact(&mut ip_bytes).await?;
+    let port = u16::from_be_bytes([hdr[2], hdr[3]]);
+    let ip_bytes: [u8; 4] = [hdr[4], hdr[5], hdr[6], hdr[7]];
 
     // Read userid (null-terminated). Max 256 bytes; we discard the content.
+    // This is still byte-by-byte but the userid is typically empty (just a
+    // 0x00 terminator), so it's a single read in practice.
     let mut userid_buf = [0u8; 256];
     let mut userid_len = 0usize;
     loop {
@@ -252,7 +270,7 @@ pub async fn handle_socks4(
         let domain = std::str::from_utf8(&domain_buf[..domain_len])
             .map_err(|e| anyhow::anyhow!("SOCKS4a domain is not valid UTF-8: {}", e))?
             .to_string();
-        let addr = resolve_preferring_v4(&domain, port).await?;
+        let addr = dns_cache.resolve(&domain, port).await?;
         (addr, Some(domain))
     } else {
         let ip = Ipv4Addr::from(ip_bytes);
@@ -279,10 +297,12 @@ pub async fn handle_socks4(
         }
     };
 
-    // SOCKS4 success reply: VN=0x00 CD=0x5A DSTPORT(2) DSTIP(4).
-    let mut reply = vec![0x00, 0x5A];
-    reply.extend_from_slice(&port.to_be_bytes());
-    reply.extend_from_slice(&ip_bytes);
+    // SOCKS4 success reply: VN=0x00 CD=0x5A DSTPORT(2) DSTIP(4) = 8 bytes, stack buf.
+    let mut reply = [0u8; 8];
+    reply[0] = 0x00;
+    reply[1] = 0x5A;
+    reply[2..4].copy_from_slice(&port.to_be_bytes());
+    reply[4..8].copy_from_slice(&ip_bytes);
     client.write_all(&reply).await?;
 
     // Relay with desync.

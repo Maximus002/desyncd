@@ -1,4 +1,4 @@
-//! Secure DNS resolver module.
+//! Secure DNS resolver with in-process caching.
 //!
 //! Bypasses DNS poisoning by querying public DNS servers via
 //! DNS-over-TLS (DoT, RFC 7858) on port 853. Unlike plain UDP/53,
@@ -8,14 +8,18 @@
 //!
 //! Falls back to plain UDP/53 if DoT fails, then to system DNS.
 //!
-//! Enabled via `[adaptation] secure_dns = true` in config (default).
+//! This crate also provides [`DnsCache`], an in-process LRU-like cache
+//! that memoizes `domain -> SocketAddr` for a configurable TTL so that
+//! repeat proxy connections don't re-enter the resolver every time.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, trace, warn};
 
@@ -57,12 +61,12 @@ fn dot_tls_config() -> Arc<rustls::ClientConfig> {
 /// Pool of persistent DoT connections to avoid repeated TLS handshakes.
 struct DotPool {
     /// One cached connection per server index.
-    conns: Vec<tokio::sync::Mutex<Option<TlsStream<TcpStream>>>>,
+    conns: Vec<Mutex<Option<TlsStream<TcpStream>>>>,
 }
 
 impl DotPool {
     fn new() -> Self {
-        let conns = DOT_SERVERS.iter().map(|_| tokio::sync::Mutex::new(None)).collect();
+        let conns = DOT_SERVERS.iter().map(|_| Mutex::new(None)).collect();
         Self { conns }
     }
 
@@ -373,6 +377,130 @@ fn skip_dns_name(data: &[u8], mut pos: usize) -> anyhow::Result<usize> {
     Ok(pos)
 }
 
+// -----------------------------------------------------------------------------
+// DnsCache — TTL-based in-process cache for domain -> SocketAddr.
+// -----------------------------------------------------------------------------
+
+/// A single cache entry keyed by `(domain, port)`.
+#[derive(Clone)]
+struct CacheEntry {
+    /// Resolved address (IPv4 preferred).
+    addr: SocketAddr,
+    /// Time at which this entry should be considered stale.
+    expires_at: Instant,
+}
+
+/// In-process DNS cache that memoizes resolved `domain -> SocketAddr` for a
+/// configurable TTL.
+///
+/// This sits on the proxy hot path so that every new connection to an
+/// already-seen domain can skip both the system resolver (20–50 ms blocking
+/// `getaddrinfo` call on cache miss) and the DoT round-trip (~50–150 ms).
+///
+/// On cache miss, we call [`resolve_with_fallback`] which prefers DoT
+/// (encrypted, anti-poisoning) and falls back to the system resolver.
+/// We store the first IPv4 address we find (or the first address of any
+/// family if no IPv4 is available).
+///
+/// The cache is bounded by a soft size limit: when a miss would insert into
+/// a full cache, we evict the oldest-expiring entry. No explicit LRU tracking
+/// — the TTL-based expiry naturally keeps hot domains alive.
+pub struct DnsCache {
+    ttl: Duration,
+    max_entries: usize,
+    entries: Mutex<HashMap<(String, u16), CacheEntry>>,
+}
+
+impl DnsCache {
+    /// Create a new cache with the given TTL. Default soft cap = 1024 entries.
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            max_entries: 1024,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a new cache with a custom entry cap.
+    pub fn with_capacity(ttl: Duration, max_entries: usize) -> Self {
+        Self {
+            ttl,
+            max_entries,
+            entries: Mutex::new(HashMap::with_capacity(max_entries)),
+        }
+    }
+
+    /// Resolve `domain:port` to a `SocketAddr`, using the cache when possible.
+    ///
+    /// Hot path (cache hit, ~µs):
+    ///   1. Acquire mutex, look up `(domain, port)`, check expiry, return.
+    ///
+    /// Cold path (cache miss, 20–150 ms):
+    ///   1. Drop the mutex.
+    ///   2. Call [`resolve_with_fallback`] (DoT → UDP → system).
+    ///   3. Pick IPv4-preferred address.
+    ///   4. Re-acquire mutex, insert, return.
+    ///
+    /// The mutex is NOT held across the network call, so concurrent lookups
+    /// for different domains do not serialize. Two concurrent lookups for
+    /// the SAME domain may both resolve; whichever wins the re-insert race
+    /// is fine — they'll produce the same answer.
+    pub async fn resolve(&self, domain: &str, port: u16) -> anyhow::Result<SocketAddr> {
+        let key = (domain.to_string(), port);
+
+        // --- Cache hit fast path ---
+        {
+            let guard = self.entries.lock().await;
+            if let Some(entry) = guard.get(&key) {
+                if entry.expires_at > Instant::now() {
+                    trace!(%domain, port, addr = %entry.addr, "dns_cache: hit");
+                    return Ok(entry.addr);
+                }
+            }
+        }
+
+        // --- Cache miss: perform real resolution without holding the lock ---
+        trace!(%domain, port, "dns_cache: miss, resolving");
+        let ips = resolve_with_fallback(domain).await?;
+        let chosen = ips
+            .iter()
+            .find(|ip| ip.is_ipv4())
+            .copied()
+            .or_else(|| ips.first().copied())
+            .ok_or_else(|| anyhow::anyhow!("no IPs resolved for {}", domain))?;
+        let addr = SocketAddr::new(chosen, port);
+
+        // --- Re-acquire and insert ---
+        let mut guard = self.entries.lock().await;
+        if guard.len() >= self.max_entries {
+            // Evict the entry with the soonest expiry (natural LRU-by-TTL).
+            if let Some(victim_key) = guard
+                .iter()
+                .min_by_key(|(_, e)| e.expires_at)
+                .map(|(k, _)| k.clone())
+            {
+                guard.remove(&victim_key);
+            }
+        }
+        guard.insert(
+            key,
+            CacheEntry {
+                addr,
+                expires_at: Instant::now() + self.ttl,
+            },
+        );
+
+        debug!(%domain, port, %addr, "dns_cache: resolved and cached");
+        Ok(addr)
+    }
+
+    /// Return the number of entries currently cached (for tests/metrics).
+    #[cfg(test)]
+    async fn len(&self) -> usize {
+        self.entries.lock().await.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +552,51 @@ mod tests {
         let ips = parse_dns_response(&response).unwrap();
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0], IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[tokio::test]
+    async fn test_dns_cache_insert_and_hit() {
+        // Pre-populate the cache manually so the test doesn't require network.
+        let cache = DnsCache::new(Duration::from_secs(60));
+        {
+            let mut guard = cache.entries.lock().await;
+            guard.insert(
+                ("example.com".to_string(), 443),
+                CacheEntry {
+                    addr: "1.2.3.4:443".parse().unwrap(),
+                    expires_at: Instant::now() + Duration::from_secs(60),
+                },
+            );
+        }
+        let addr = cache.resolve("example.com", 443).await.unwrap();
+        assert_eq!(addr, "1.2.3.4:443".parse().unwrap());
+        assert_eq!(cache.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dns_cache_expiry() {
+        // Insert an already-expired entry. The resolver then has to be
+        // called; since we can't mock it here we just verify that the
+        // expired entry is NOT returned directly.
+        let cache = DnsCache::new(Duration::from_millis(1));
+        {
+            let mut guard = cache.entries.lock().await;
+            guard.insert(
+                ("expired.example".to_string(), 443),
+                CacheEntry {
+                    addr: "9.9.9.9:443".parse().unwrap(),
+                    expires_at: Instant::now() - Duration::from_secs(1), // expired
+                },
+            );
+        }
+        // The cached value is stale — resolve() must go to the network.
+        // We assert that it does NOT return 9.9.9.9 (the stale entry).
+        // If the network is unreachable the call errors out, which is
+        // also fine — the important thing is the stale hit was not used.
+        let res = cache.resolve("expired.example", 443).await;
+        if let Ok(addr) = res {
+            assert_ne!(addr.ip(), "9.9.9.9".parse::<IpAddr>().unwrap());
+        }
     }
 
     #[tokio::test]

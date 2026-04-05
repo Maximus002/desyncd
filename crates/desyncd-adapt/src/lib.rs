@@ -3,7 +3,6 @@
 //! Automatically discovers the best DPI bypass strategy for each domain
 //! by probing with different techniques and scoring the results.
 
-pub mod dns;
 pub mod morphing;
 pub mod probe;
 pub mod search;

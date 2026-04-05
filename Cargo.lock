@@ -707,17 +707,15 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "desyncd-desync",
+ "desyncd-dns",
  "desyncd-proxy",
  "desyncd-store",
  "desyncd-strategy",
  "desyncd-types",
  "fastrand",
- "rustls",
  "serde",
  "tokio",
- "tokio-rustls",
  "tracing",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -763,6 +761,19 @@ dependencies = [
  "fastrand",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "desyncd-dns"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "fastrand",
+ "rustls",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -827,6 +838,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "desyncd-desync",
+ "desyncd-dns",
  "desyncd-packet",
  "desyncd-strategy",
  "desyncd-types",

@@ -101,7 +101,7 @@ async fn probe_inner(
 ) -> anyhow::Result<bool> {
     let mut stream = if secure_dns {
         // Resolve via public DNS to bypass ISP DNS poisoning.
-        match crate::dns::resolve_secure(domain).await {
+        match desyncd_dns::resolve_secure(domain).await {
             Ok(ips) => {
                 let mut last_err = None;
                 let mut connected = None;

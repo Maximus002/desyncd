@@ -7,12 +7,18 @@ pub mod transparent;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use desyncd_dns::DnsCache;
 use desyncd_strategy::Selector;
 use desyncd_types::StealthConfig;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing::{debug, error, info};
+
+/// Default TTL for the in-process DNS cache. 60s balances freshness with
+/// the goal of taking DNS out of the per-connection hot path.
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Run the proxy server with auto-detection of protocol.
 ///
@@ -27,6 +33,9 @@ pub async fn run_socks_proxy(
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen_addr).await?;
     let stealth = Arc::new(stealth);
+    // Shared DNS cache lives for the lifetime of the proxy — entries are
+    // reused across every connection from every client.
+    let dns_cache = Arc::new(DnsCache::new(DNS_CACHE_TTL));
     info!(%listen_addr, "proxy listening (SOCKS5 + SOCKS4 + HTTP proxy auto-detect)");
 
     loop {
@@ -42,9 +51,10 @@ pub async fn run_socks_proxy(
         };
         let selector = selector.clone();
         let stealth = stealth.clone();
+        let dns_cache = dns_cache.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, peer_addr, &selector, stealth.as_ref().as_ref()).await {
+            if let Err(e) = handle_connection(stream, peer_addr, &selector, stealth.as_ref().as_ref(), &dns_cache).await {
                 error!(%peer_addr, error = %e, "connection error");
             }
         });
@@ -57,6 +67,7 @@ async fn handle_connection(
     peer_addr: SocketAddr,
     selector: &Selector,
     stealth: Option<&StealthConfig>,
+    dns_cache: &Arc<DnsCache>,
 ) -> anyhow::Result<()> {
     // Peek the first byte to determine protocol.
     let mut peek_buf = [0u8; 1];
@@ -66,12 +77,12 @@ async fn handle_connection(
         0x05 => {
             // SOCKS5.
             debug!(%peer_addr, "detected SOCKS5 protocol");
-            socks5::handle_client(stream, peer_addr, selector, stealth).await
+            socks5::handle_client(stream, peer_addr, selector, stealth, dns_cache).await
         }
         0x04 => {
             // SOCKS4/4a.
             debug!(%peer_addr, "detected SOCKS4 protocol");
-            socks5::handle_socks4(stream, peer_addr, selector, stealth).await
+            socks5::handle_socks4(stream, peer_addr, selector, stealth, dns_cache).await
         }
         // Any ASCII letter → HTTP proxy request.
         // CONNECT (0x43), GET (0x47), POST (0x50), PUT (0x50),
@@ -81,11 +92,11 @@ async fn handle_connection(
             let mut first_buf = vec![0u8; 8192];
             let n = stream.read(&mut first_buf).await?;
             first_buf.truncate(n);
-            http_connect::handle_http_proxy(stream, peer_addr, &first_buf, selector, stealth).await
+            http_connect::handle_http_proxy(stream, peer_addr, &first_buf, selector, stealth, dns_cache).await
         }
         other => {
             debug!(%peer_addr, first_byte = other, "unknown protocol byte, trying SOCKS5");
-            socks5::handle_client(stream, peer_addr, selector, stealth).await
+            socks5::handle_client(stream, peer_addr, selector, stealth, dns_cache).await
         }
     }
 }

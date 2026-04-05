@@ -10,11 +10,9 @@ desyncd-desync = { path = "../desyncd-desync" }
 desyncd-store = { path = "../desyncd-store" }
 desyncd-strategy = { path = "../desyncd-strategy" }
 desyncd-proxy = { path = "../desyncd-proxy" }
+desyncd-dns = { path = "../desyncd-dns" }
 tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 fastrand.workspace = true
-rustls.workspace = true
-tokio-rustls.workspace = true
-webpki-roots.workspace = true
