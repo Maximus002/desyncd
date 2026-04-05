@@ -552,6 +552,7 @@ fn make_strategy(
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth,
             l7_filter: None,

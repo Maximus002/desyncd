@@ -40,6 +40,22 @@
   let expandedDomain = $state('');
   let unlisten: UnlistenFn | null = null;
 
+  /// Toggle the expanded state for a result row. Extracted so the same
+  /// handler is used for both click and keyboard activation (needed for
+  /// a11y — Svelte flags clickable non-button elements without a keyboard
+  /// path).
+  function toggleExpand(domain: string) {
+    expandedDomain = expandedDomain === domain ? '' : domain;
+  }
+
+  function handleRowKey(event: KeyboardEvent, domain: string) {
+    // Enter and Space are the standard activation keys for ARIA buttons.
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleExpand(domain);
+    }
+  }
+
   onMount(async () => {
     try {
       presets = await invoke<string[]>('get_presets');
@@ -149,7 +165,14 @@
     <div class="results">
       {#each results as result}
         <div class="result-card">
-          <div class="result-header" onclick={() => expandedDomain = expandedDomain === result.domain ? '' : result.domain}>
+          <div
+            class="result-header"
+            role="button"
+            tabindex="0"
+            aria-expanded={expandedDomain === result.domain}
+            onclick={() => toggleExpand(result.domain)}
+            onkeydown={(e) => handleRowKey(e, result.domain)}
+          >
             <span class="domain">{result.domain}</span>
             <div class="result-badges">
               {#if result.strategy}

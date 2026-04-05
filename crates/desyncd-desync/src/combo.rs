@@ -42,6 +42,7 @@ pub fn apply_chain(
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth: None,
             l7_filter: None,

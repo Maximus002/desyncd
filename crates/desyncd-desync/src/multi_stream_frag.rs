@@ -1,28 +1,42 @@
 //! Multi-Stream TLS Record Fragmentation.
 //!
 //! Extends `tls_record_frag` by splitting the ClientHello into N TLS records
-//! (default 3) instead of just 2. Each record contains a portion of the
-//! handshake data, with split points chosen so the SNI hostname is distributed
-//! across multiple records.
+//! (default 3) instead of just 2. Each record carries a slice of the
+//! handshake bytes, and split points are chosen so that the SNI hostname
+//! always ends up in the **last** fragment. That forces any DPI reassembler
+//! to coalesce all N records before it can read the SNI — raising N by 1
+//! is often enough to exceed a fixed reassembly window.
 //!
 //! This defeats DPI systems that:
 //! - Only read the first TLS record (TSPU) — already beaten by tls_record_frag
 //! - Read the first N-1 records (beaten when N > their reassembly window)
 //! - Use fixed-size buffers for TLS reassembly (overflowed by many tiny records)
 //!
-//! The technique is RFC 5246 compliant — handshake fragmentation across records
-//! is explicitly allowed and all modern TLS implementations handle it.
+//! The technique is RFC 5246 §6.2.1 compliant — handshake messages may be
+//! fragmented across multiple records, and every modern TLS stack reassembles
+//! them transparently.
+//!
+//! ## Historic note
+//!
+//! Up to v2.0 the fragment count was carried via the `sni_mode` config field
+//! (stringly-typed). v2.1 introduced a dedicated `fragments: Option<usize>`
+//! field; `sni_mode` numeric values are still accepted as a fallback for
+//! existing on-disk configs but are considered deprecated and will be
+//! removed in a future release.
 
 use crate::PayloadContext;
 use crate::technique::{Technique, TechniqueConfig};
 use desyncd_types::{AppProtocol, DesyncAction, Result, SplitPosition, StealthConfig};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// Default number of TLS record fragments.
 const DEFAULT_FRAGMENTS: usize = 3;
 
 /// Maximum allowed fragments (to avoid pathological cases).
 const MAX_FRAGMENTS: usize = 8;
+
+/// Minimum allowed fragments (2 = same as `tls_record_frag`).
+const MIN_FRAGMENTS: usize = 2;
 
 pub struct MultiStreamFragTechnique;
 
@@ -38,14 +52,32 @@ impl Technique for MultiStreamFragTechnique {
         config: &TechniqueConfig,
         _stealth: Option<&StealthConfig>,
     ) -> Result<DesyncAction> {
-        // Parse fragment count from sni_mode field (reusing existing config field).
-        // Format: "3", "4", "5" etc. Default: 3.
-        let n_fragments = config
-            .sni_mode
-            .as_deref()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_FRAGMENTS)
-            .clamp(2, MAX_FRAGMENTS);
+        // Resolve the fragment count. Prefer the new typed `fragments`
+        // field; fall back to parsing `sni_mode` for backward compatibility
+        // with pre-2.1 configs, with a warning so operators notice the
+        // deprecated usage.
+        let n_fragments = if let Some(n) = config.fragments {
+            n
+        } else if let Some(s) = config.sni_mode.as_deref() {
+            match s.parse::<usize>() {
+                Ok(n) => {
+                    warn!(
+                        "multi_stream_frag: reading fragment count from deprecated \
+                         `sni_mode = \"{}\"` — migrate to `fragments = {}`",
+                        s, n
+                    );
+                    n
+                }
+                Err(_) => {
+                    // `sni_mode` holds a non-numeric value (intended for
+                    // `sni_manip`, not this technique). Fall back to default.
+                    DEFAULT_FRAGMENTS
+                }
+            }
+        } else {
+            DEFAULT_FRAGMENTS
+        }
+        .clamp(MIN_FRAGMENTS, MAX_FRAGMENTS);
 
         apply(ctx, split_pos, n_fragments)
     }
@@ -157,60 +189,62 @@ pub fn apply(
     Ok(DesyncAction::Replace(combined))
 }
 
-/// Compute split points that distribute fragments around the SNI position.
+/// Compute split points so the SNI hostname always lands in the **last**
+/// TLS record fragment.
 ///
-/// Strategy: place one split just before the SNI offset, then distribute
-/// remaining splits evenly across the data. This ensures the SNI hostname
-/// is split across at least 2 records.
+/// The goal of multi-record fragmentation is to force a DPI reassembler to
+/// coalesce as many records as possible before it can read the SNI. If the
+/// reassembler has a hard cap (e.g. "only look at the first 3 records"),
+/// the only useful knob we have is: push the SNI into record `N` where
+/// `N > cap`. Adding fragments **after** the SNI is a no-op — the DPI has
+/// already seen everything it needs by record `k` (the one containing the
+/// SNI), regardless of how many more records follow.
+///
+/// Therefore the algorithm distributes all `n_fragments - 1` cuts in the
+/// `[0, sni_offset]` range:
+///
+///   * `n=2` → `[pre | SNI+tail]`
+///   * `n=3` → `[pre1 | pre2 | SNI+tail]`
+///   * `n=4` → `[pre1 | pre2 | pre3 | SNI+tail]`
+///   * `n=5` → `[pre1 | pre2 | pre3 | pre4 | SNI+tail]`
+///
+/// where `preK` are slices of the data that precede the SNI hostname.
+///
+/// If there is not enough pre-SNI data to host the requested number of
+/// cuts, duplicates are collapsed and the effective fragment count may be
+/// smaller than requested — this is graceful degradation, not an error.
 fn compute_split_points(
     data_len: usize,
     sni_offset: usize,
     n_fragments: usize,
 ) -> Vec<usize> {
-    if n_fragments <= 1 {
+    if n_fragments <= 1 || data_len == 0 {
         return vec![];
     }
 
     let n_splits = n_fragments - 1;
 
-    if n_splits == 1 {
-        // Simple case: just split at the SNI offset.
-        return vec![sni_offset];
-    }
+    // Clamp sni_offset into a usable range. If the caller gave us something
+    // outside (0, data_len), fall back to splitting near the middle — still
+    // better than panicking.
+    let sni_offset = sni_offset.clamp(1, data_len.saturating_sub(1));
 
-    // Place splits to maximize SNI fragmentation:
-    // - One split just before SNI (sni_offset - small_delta)
-    // - One split at SNI offset itself (or just after)
-    // - Remaining splits distributed evenly in the remaining space
+    // Degenerate case: not enough pre-SNI data for multiple cuts.
+    // We can fit at most `sni_offset` distinct split positions in [1..sni_offset].
+    // If n_splits exceeds that, the `dedup` below will collapse the extras.
     let mut points = Vec::with_capacity(n_splits);
 
-    // First: split a few bytes before the SNI offset.
-    let pre_sni = (sni_offset / 2).max(1);
-    points.push(pre_sni);
-
-    // Second: split at or just after the SNI offset.
-    if n_splits >= 2 {
-        let post_sni = sni_offset.clamp(pre_sni + 1, data_len.saturating_sub(1));
-        points.push(post_sni);
+    // Place `n_splits` evenly-spaced cuts in (0, sni_offset], inclusive of
+    // sni_offset itself. The last cut = sni_offset guarantees the final
+    // fragment starts exactly at the SNI hostname.
+    //
+    // positions: i * sni_offset / n_splits for i = 1..=n_splits
+    for i in 1..=n_splits {
+        let pos = (sni_offset * i) / n_splits;
+        let pos = pos.clamp(1, data_len.saturating_sub(1));
+        points.push(pos);
     }
 
-    // Distribute any remaining splits evenly in the space after post_sni.
-    if n_splits > 2 {
-        if let Some(&last_point) = points.last() {
-            let remaining_space = data_len.saturating_sub(last_point + 1);
-            let extra_splits = n_splits - 2;
-
-            for i in 1..=extra_splits {
-                let pos = last_point + (remaining_space * i) / (extra_splits + 1);
-                let pos = pos.clamp(last_point + 1, data_len.saturating_sub(1));
-                if points.last().is_none_or(|&last| pos > last) {
-                    points.push(pos);
-                }
-            }
-        }
-    }
-
-    // Ensure all points are unique, sorted, and within bounds.
     points.sort();
     points.dedup();
     points.retain(|&p| p > 0 && p < data_len);
@@ -265,70 +299,172 @@ mod tests {
         buf
     }
 
+    /// Walk the resulting payload record-by-record and return each record's
+    /// data slice (without the 5-byte header). Asserts every record has
+    /// ContentType=Handshake and valid length.
+    fn extract_records(new_payload: &[u8]) -> Vec<&[u8]> {
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos < new_payload.len() {
+            assert!(pos + 5 <= new_payload.len(), "record header overflow");
+            assert_eq!(new_payload[pos], 0x16, "record at {} is not Handshake", pos);
+            let len = u16::from_be_bytes([new_payload[pos + 3], new_payload[pos + 4]]) as usize;
+            assert!(len > 0, "record at {} has zero length", pos);
+            assert!(pos + 5 + len <= new_payload.len(), "record data overflow");
+            out.push(&new_payload[pos + 5..pos + 5 + len]);
+            pos += 5 + len;
+        }
+        out
+    }
+
+    /// Assert that the SNI hostname bytes live entirely inside the LAST
+    /// record. This is the whole point of the technique — DPI must read
+    /// every single fragment before it can see the SNI.
+    fn assert_sni_in_last_record(records: &[&[u8]], sni: &str) {
+        let sni_bytes = sni.as_bytes();
+        let last = records.last().expect("no records");
+        assert!(
+            last.windows(sni_bytes.len()).any(|w| w == sni_bytes),
+            "SNI {:?} not found in last record {:02x?}",
+            sni,
+            last
+        );
+        // And crucially: not in any of the earlier records.
+        for (i, r) in records.iter().enumerate().take(records.len() - 1) {
+            assert!(
+                !r.windows(sni_bytes.len()).any(|w| w == sni_bytes),
+                "SNI {:?} leaked into non-last record {} (of {})",
+                sni,
+                i,
+                records.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_2_fragments() {
+        let payload = build_test_client_hello("example.com");
+        let ctx = PayloadContext::new(payload.clone());
+
+        let result = apply(&ctx, &SplitPosition::Sni, 2).unwrap();
+        let DesyncAction::Replace(new_payload) = result else { panic!("expected Replace") };
+
+        // 2 fragments = same as tls_record_frag: +5 bytes.
+        assert_eq!(new_payload.len(), payload.len() + 5);
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 2);
+        assert_sni_in_last_record(&records, "example.com");
+    }
+
     #[test]
     fn test_3_fragments() {
         let payload = build_test_client_hello("example.com");
         let ctx = PayloadContext::new(payload.clone());
 
         let result = apply(&ctx, &SplitPosition::Sni, 3).unwrap();
-        match result {
-            DesyncAction::Replace(new_payload) => {
-                // Extra overhead: 2 additional TLS headers (10 bytes).
-                assert_eq!(new_payload.len(), payload.len() + 10);
-                // Count TLS record headers.
-                let mut pos = 0;
-                let mut records = 0;
-                while pos < new_payload.len() {
-                    assert_eq!(new_payload[pos], 0x16, "record {} is not TLS Handshake", records);
-                    let len = u16::from_be_bytes([new_payload[pos + 3], new_payload[pos + 4]]) as usize;
-                    assert!(len > 0, "record {} has zero length", records);
-                    pos += 5 + len;
-                    records += 1;
-                }
-                assert_eq!(records, 3);
-            }
-            _ => panic!("expected Replace"),
-        }
+        let DesyncAction::Replace(new_payload) = result else { panic!("expected Replace") };
+
+        // Extra overhead: 2 additional TLS headers (10 bytes).
+        assert_eq!(new_payload.len(), payload.len() + 10);
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 3);
+        assert_sni_in_last_record(&records, "example.com");
     }
 
     #[test]
-    fn test_5_fragments() {
+    fn test_4_fragments_sni_in_last() {
+        // Regression for the friend-reported bug: pre-v2.1, n=4 placed
+        // the extra fragment AFTER the SNI, so SNI still lived in record 3
+        // (same as n=3 — useless). Verify the fix: SNI must be in record 4.
         let payload = build_test_client_hello("www.youtube.com");
         let ctx = PayloadContext::new(payload.clone());
 
-        let result = apply(&ctx, &SplitPosition::Sni, 5).unwrap();
-        match result {
-            DesyncAction::Replace(new_payload) => {
-                // Extra overhead: 4 additional TLS headers (20 bytes).
-                assert_eq!(new_payload.len(), payload.len() + 20);
-                let mut pos = 0;
-                let mut records = 0;
-                while pos < new_payload.len() {
-                    assert_eq!(new_payload[pos], 0x16);
-                    let len = u16::from_be_bytes([new_payload[pos + 3], new_payload[pos + 4]]) as usize;
-                    assert!(len > 0);
-                    pos += 5 + len;
-                    records += 1;
-                }
-                assert_eq!(records, 5);
-            }
-            _ => panic!("expected Replace"),
-        }
+        let result = apply(&ctx, &SplitPosition::Sni, 4).unwrap();
+        let DesyncAction::Replace(new_payload) = result else { panic!("expected Replace") };
+
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 4, "expected exactly 4 records");
+        assert_sni_in_last_record(&records, "www.youtube.com");
     }
 
     #[test]
-    fn test_2_fragments_matches_original() {
-        let payload = build_test_client_hello("example.com");
+    fn test_5_fragments_sni_in_last() {
+        let payload = build_test_client_hello("www.facebook.com");
         let ctx = PayloadContext::new(payload.clone());
 
-        let result = apply(&ctx, &SplitPosition::Sni, 2).unwrap();
-        match result {
-            DesyncAction::Replace(new_payload) => {
-                // 2 fragments = same as tls_record_frag: +5 bytes.
-                assert_eq!(new_payload.len(), payload.len() + 5);
-            }
-            _ => panic!("expected Replace"),
-        }
+        let result = apply(&ctx, &SplitPosition::Sni, 5).unwrap();
+        let DesyncAction::Replace(new_payload) = result else { panic!("expected Replace") };
+
+        // Extra overhead: 4 additional TLS headers (20 bytes).
+        assert_eq!(new_payload.len(), payload.len() + 20);
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 5);
+        assert_sni_in_last_record(&records, "www.facebook.com");
+    }
+
+    #[test]
+    fn test_8_fragments_sni_in_last() {
+        let payload = build_test_client_hello("discord.com");
+        let ctx = PayloadContext::new(payload.clone());
+
+        let result = apply(&ctx, &SplitPosition::Sni, 8).unwrap();
+        let DesyncAction::Replace(new_payload) = result else { panic!("expected Replace") };
+
+        let records = extract_records(&new_payload);
+        assert!(records.len() <= 8, "got {} records, expected <= 8", records.len());
+        assert!(records.len() >= 2, "got {} records, expected >= 2", records.len());
+        assert_sni_in_last_record(&records, "discord.com");
+    }
+
+    #[test]
+    fn test_fragments_field_preferred_over_sni_mode() {
+        // When both `fragments` and numeric `sni_mode` are set, `fragments`
+        // wins (sni_mode path is deprecated backcompat).
+        let payload = build_test_client_hello("example.com");
+        let ctx = PayloadContext::new(payload);
+
+        let config = TechniqueConfig {
+            name: "multi_stream_frag".into(),
+            split_position: Some(SplitPosition::Sni),
+            enabled: true,
+            fake_type: None,
+            sni_mode: Some("2".into()),    // would produce 2 fragments
+            fragments: Some(4),            // but fragments wins → 4
+            host_mode: None,
+            stealth: None,
+            l7_filter: None,
+        };
+        let tech = MultiStreamFragTechnique;
+        let action = tech.apply(&ctx, &SplitPosition::Sni, &config, None).unwrap();
+        let DesyncAction::Replace(new_payload) = action else { panic!("expected Replace") };
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 4);
+        assert_sni_in_last_record(&records, "example.com");
+    }
+
+    #[test]
+    fn test_sni_mode_numeric_still_works_with_warning() {
+        // Backward-compat: old configs using sni_mode="4" should still work.
+        let payload = build_test_client_hello("example.com");
+        let ctx = PayloadContext::new(payload);
+
+        let config = TechniqueConfig {
+            name: "multi_stream_frag".into(),
+            split_position: Some(SplitPosition::Sni),
+            enabled: true,
+            fake_type: None,
+            sni_mode: Some("4".into()),
+            fragments: None,
+            host_mode: None,
+            stealth: None,
+            l7_filter: None,
+        };
+        let tech = MultiStreamFragTechnique;
+        let action = tech.apply(&ctx, &SplitPosition::Sni, &config, None).unwrap();
+        let DesyncAction::Replace(new_payload) = action else { panic!("expected Replace") };
+        let records = extract_records(&new_payload);
+        assert_eq!(records.len(), 4);
+        assert_sni_in_last_record(&records, "example.com");
     }
 
     #[test]
@@ -342,5 +478,41 @@ mod tests {
             },
         };
         assert!(apply(&ctx, &SplitPosition::Sni, 3).is_err());
+    }
+
+    #[test]
+    fn test_compute_split_points_n4_all_before_sni() {
+        // Direct unit test of the algorithm: n=4 → n-1 = 3 splits, all
+        // in (0, sni_offset], with the last == sni_offset. The expected
+        // positions are evenly spaced: 300/3=100, 2·100=200, 3·100=300.
+        let splits = compute_split_points(1000, 300, 4);
+        assert_eq!(splits, vec![100, 200, 300]);
+        assert_eq!(*splits.last().unwrap(), 300);
+    }
+
+    #[test]
+    fn test_compute_split_points_n5_all_before_sni() {
+        // n=5 → 4 splits, evenly spaced in (0, 300]: 75, 150, 225, 300.
+        let splits = compute_split_points(1000, 300, 5);
+        assert_eq!(splits, vec![75, 150, 225, 300]);
+    }
+
+    #[test]
+    fn test_compute_split_points_n3_matches_friend_example() {
+        // The friend's specification:
+        //   n=3 → [pre | mid | SNI+tail]
+        // Two splits, both ≤ sni_offset, last at sni_offset.
+        let splits = compute_split_points(1000, 300, 3);
+        assert_eq!(splits, vec![150, 300]);
+    }
+
+    #[test]
+    fn test_compute_split_points_degenerate_tiny_sni_offset() {
+        // sni_offset=3 with n=5 → only 2-3 unique split points fit.
+        // Must not panic, must still place last split at/before sni_offset.
+        let splits = compute_split_points(100, 3, 5);
+        assert!(!splits.is_empty());
+        assert!(splits.iter().all(|&p| p > 0 && p < 100));
+        assert!(*splits.last().unwrap() <= 3);
     }
 }

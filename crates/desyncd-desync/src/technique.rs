@@ -34,9 +34,16 @@ pub struct TechniqueConfig {
     #[serde(default)]
     pub fake_type: Option<desyncd_types::FakeType>,
 
-    /// SNI manipulation mode (for "sni_manip" technique).
+    /// SNI manipulation mode (for "sni_manip" technique, e.g. "MixedCase").
     #[serde(default)]
     pub sni_mode: Option<String>,
+
+    /// Number of TLS record fragments (for "multi_stream_frag" technique).
+    /// When unset, the technique uses its built-in default (3). Values are
+    /// clamped to a reasonable range at apply time. This field replaces the
+    /// earlier hack of reusing `sni_mode` as a stringly-typed integer.
+    #[serde(default)]
+    pub fragments: Option<usize>,
 
     /// HTTP Host manipulation mode (for "http_host" technique).
     #[serde(default)]

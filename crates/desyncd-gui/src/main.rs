@@ -270,6 +270,7 @@ async fn test_domain(domain: String) -> Result<Vec<ProbeResultInfo>, String> {
                 enabled: true,
                 fake_type: None,
                 sni_mode: None,
+                fragments: None,
                 host_mode: None,
                 stealth: None,
                 l7_filter: None,

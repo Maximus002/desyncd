@@ -10,17 +10,22 @@
 .PARAMETER Adapt
     Run auto-adaptation after install (Russia preset).
 
+.PARAMETER Gui
+    Also build the Tauri GUI (requires Node.js 18+).
+
 .PARAMETER Uninstall
     Remove desyncd.
 
 .EXAMPLE
     .\install.ps1
     .\install.ps1 -Adapt
+    .\install.ps1 -Gui
     .\install.ps1 -Uninstall
 #>
 
 param(
     [switch]$Adapt,
+    [switch]$Gui,
     [switch]$Uninstall,
     [switch]$Help
 )
@@ -46,8 +51,9 @@ if ($Help) {
 desyncd installer for Windows
 
 Usage:
-    .\install.ps1              Install or update
+    .\install.ps1              Install or update (CLI only)
     .\install.ps1 -Adapt       Install + auto-adapt (Russia preset)
+    .\install.ps1 -Gui         Install CLI + build Tauri GUI (needs Node.js 18+)
     .\install.ps1 -Uninstall   Remove desyncd
 
 "@
@@ -128,6 +134,37 @@ git is required. Install it:
     }
 }
 
+# ── Check Node.js (GUI build only) ─────────────────────────────────────
+#
+# Tauri's frontend build shells out to `npm` / `node`, which aren't part of
+# Windows by default. Without this check, `cargo tauri build` fails deep
+# inside a Vite invocation with a confusing error. Fail loudly up-front
+# with a fix-it command instead.
+
+function Check-Node {
+    $node = Get-Command node -ErrorAction SilentlyContinue
+    $npm  = Get-Command npm  -ErrorAction SilentlyContinue
+
+    if (-not $node -or -not $npm) {
+        Write-Err @"
+Node.js 18+ is required for building the GUI. Install it:
+  winget install OpenJS.NodeJS.LTS
+  # or download from https://nodejs.org/
+
+After installing, re-open the terminal and run again:
+  .\install.ps1 -Gui
+"@
+    }
+
+    # Sanity-check the version — Tauri v2 requires Node 18+.
+    $nodeVer = (& node --version) -replace '^v',''
+    $major = [int]($nodeVer.Split('.')[0])
+    if ($major -lt 18) {
+        Write-Err "Node.js $nodeVer is too old; Tauri v2 needs 18+. Upgrade: winget install OpenJS.NodeJS.LTS"
+    }
+    Write-Ok "Node.js found: v$nodeVer"
+}
+
 # ── Clone or update ────────────────────────────────────────────────────
 
 function Fetch-Source {
@@ -171,6 +208,45 @@ function Build-Desyncd {
 
     Pop-Location
     Write-Ok "Built and installed to $BIN"
+}
+
+# ── Build GUI (Tauri) ──────────────────────────────────────────────────
+#
+# The GUI is a separate build pipeline: Vite bundles the Svelte frontend,
+# Tauri then wraps it into a native window. Both stages need Node/npm.
+# `cargo tauri build` handles invoking `npm install` + Vite automatically.
+
+function Build-Gui {
+    $srcDir = "$INSTALL_DIR\src"
+    Push-Location $srcDir
+
+    Write-Info "Building desyncd GUI (Tauri)... This will install npm dependencies on first run."
+
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+
+    # Ensure tauri-cli is available.
+    $tauri = & cargo tauri --version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Info "Installing tauri-cli..."
+        & cargo install tauri-cli --version "^2" 2>&1 | Select-Object -Last 3
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Write-Err "Failed to install tauri-cli"
+        }
+    }
+
+    Push-Location "crates\desyncd-gui"
+    & cargo tauri build 2>&1 | Select-Object -Last 5
+    $tauriExit = $LASTEXITCODE
+    Pop-Location
+
+    if ($tauriExit -ne 0) {
+        Pop-Location
+        Write-Err "GUI build failed (exit $tauriExit)"
+    }
+
+    Pop-Location
+    Write-Ok "GUI built (see target\release\bundle\ for installers)"
 }
 
 # ── Add to PATH ────────────────────────────────────────────────────────
@@ -221,9 +297,17 @@ function Print-Usage {
 
 Check-Git
 Ensure-Rust
+if ($Gui) {
+    # Fail fast on missing Node before we waste time cloning + building the CLI.
+    Check-Node
+}
 Fetch-Source
 Build-Desyncd
 Ensure-Path
+
+if ($Gui) {
+    Build-Gui
+}
 
 if ($Adapt) {
     Run-Adapt

@@ -34,7 +34,7 @@ impl Store {
         techniques: &[TechniqueConfig],
     ) -> anyhow::Result<i64> {
         let json = serde_json::to_string(techniques)?;
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             conn.execute(
                 "INSERT INTO strategies (name, techniques_json, updated_at)
                  VALUES (?1, ?2, datetime('now'))
@@ -57,7 +57,7 @@ impl Store {
 
     /// Get a strategy by name.
     pub fn get_strategy(&self, name: &str) -> anyhow::Result<Option<StrategyRecord>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, name, techniques_json FROM strategies WHERE name = ?1",
             )?;
@@ -88,7 +88,7 @@ impl Store {
 
     /// Get the best strategy for a domain (highest score).
     pub fn get_best_strategy(&self, domain: &str) -> anyhow::Result<Option<StrategyRecord>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT s.id, s.name, s.techniques_json
                  FROM domain_strategies ds
@@ -132,7 +132,7 @@ impl Store {
         latency_ms: Option<i64>,
         error_msg: Option<&str>,
     ) -> anyhow::Result<i64> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             conn.execute(
                 "INSERT INTO test_results (domain, strategy_id, technique, success, latency_ms, error_msg)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -148,7 +148,7 @@ impl Store {
         domain: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<TestResultRecord>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, domain, strategy_id, technique, success, latency_ms, error_msg, tested_at
                  FROM test_results
@@ -183,7 +183,7 @@ impl Store {
     /// Used for smart prediction: if tls_record_frag worked for facebook.com,
     /// it will likely work for instagram.com on the same ISP/DPI.
     pub fn get_any_best_strategy(&self) -> anyhow::Result<Option<StrategyRecord>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT s.id, s.name, s.techniques_json
                  FROM domain_strategies ds
@@ -223,7 +223,7 @@ impl Store {
         strategy_id: i64,
         score: f64,
     ) -> anyhow::Result<()> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             conn.execute(
                 "INSERT INTO domain_strategies (domain, strategy_id, score, last_tested, last_success, confidence, success_count, fail_count)
                  VALUES (?1, ?2, ?3, datetime('now'), datetime('now'), 1.0, 1, 0)
@@ -243,7 +243,7 @@ impl Store {
 
     /// Record a relay success for a domain (boosts confidence).
     pub fn record_relay_success(&self, domain: &str) -> anyhow::Result<()> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             conn.execute(
                 "UPDATE domain_strategies SET
                     success_count = success_count + 1,
@@ -257,7 +257,7 @@ impl Store {
 
     /// Record a relay failure for a domain (degrades confidence).
     pub fn record_relay_failure(&self, domain: &str) -> anyhow::Result<()> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             conn.execute(
                 "UPDATE domain_strategies SET
                     fail_count = fail_count + 1
@@ -274,7 +274,7 @@ impl Store {
     /// - `decay`: exponential, half-life = 7 days
     /// - `success_rate`: `successes / (successes + failures)`, min 10 samples
     pub fn get_confidence(&self, domain: &str) -> anyhow::Result<f64> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let result: Option<(f64, i64, i64, String)> = conn
                 .prepare(
                     "SELECT confidence, success_count, fail_count, last_success
@@ -333,7 +333,7 @@ impl Store {
         &self,
         min_confidence: f64,
     ) -> anyhow::Result<Option<(StrategyRecord, f64)>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT s.id, s.name, s.techniques_json,
                         ds.confidence, ds.success_count, ds.fail_count, ds.last_success
@@ -384,12 +384,16 @@ impl Store {
     }
 
     /// Get or create a provider record.
+    ///
+    /// Runs on the write lane so the SELECT + conditional INSERT are
+    /// serialized against other writers (otherwise two concurrent callers
+    /// could both miss the row and both insert).
     pub fn get_or_create_provider(
         &self,
         name: &str,
         asn: Option<u32>,
     ) -> anyhow::Result<i64> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             let existing: Option<i64> = conn
                 .prepare("SELECT id FROM providers WHERE name = ?1")?
                 .query_row(rusqlite::params![name], |row| row.get(0))
@@ -414,7 +418,7 @@ impl Store {
         source_url: Option<&str>,
         domains: &[String],
     ) -> anyhow::Result<()> {
-        self.with_conn(|conn| {
+        self.with_write_conn(|conn| {
             // Upsert hostlist.
             conn.execute(
                 "INSERT INTO hostlists (name, source_url, updated_at)
@@ -450,7 +454,7 @@ impl Store {
 
     /// Get all domains from a host list.
     pub fn get_hostlist_domains(&self, name: &str) -> anyhow::Result<Vec<String>> {
-        self.with_conn(|conn| {
+        self.with_read_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT he.domain
                  FROM hostlist_entries he
@@ -542,6 +546,7 @@ mod tests {
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth: None,
             l7_filter: None,
@@ -579,6 +584,7 @@ mod tests {
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth: None,
             l7_filter: None,
@@ -615,6 +621,7 @@ mod tests {
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth: None,
             l7_filter: None,
@@ -640,6 +647,7 @@ mod tests {
             enabled: true,
             fake_type: None,
             sni_mode: None,
+            fragments: None,
             host_mode: None,
             stealth: None,
             l7_filter: None,

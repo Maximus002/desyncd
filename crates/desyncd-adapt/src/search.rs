@@ -161,33 +161,60 @@ pub async fn find_best_strategy(
 
     debug!(%domain, "baseline failed, searching for bypass strategy");
 
-    // Step 2: Single technique sweep.
-    // Note: fake_packet is excluded — in SOCKS mode, fake data is sent
-    // on the same TCP stream and reaches the server, breaking TLS.
-    // It only works in NFQ mode where packets can have TTL=1.
-    let techniques = [
-        ("tcp_split", SplitPosition::Sni),
-        ("tls_record_frag", SplitPosition::Sni),
-        ("multi_stream_frag", SplitPosition::Sni),
-        ("disorder", SplitPosition::Sni),
-        ("sni_manip", SplitPosition::Sni),
-    ];
-
-    let mut winners: Vec<(String, SplitPosition, f64)> = Vec::new();
-
-    for (tech_name, split_pos) in &techniques {
-        let strategy = Strategy {
-            name: format!("probe_{}", tech_name),
-            techniques: vec![TechniqueConfig {
-                name: tech_name.to_string(),
-                split_position: Some(split_pos.clone()),
+    // Step 2: Single-technique sweep.
+    //
+    // We build a list of (label, TechniqueConfig) pairs so each variant
+    // carries its own fully-parameterised config. `multi_stream_frag` is
+    // expanded into three distinct entries (n=2/3/4) because different DPI
+    // reassembly caps require different fragment counts: n=2 matches
+    // `tls_record_frag`, n=3 beats typical TSPU, n=4 pushes the SNI past
+    // the reassembly window of stricter middleboxes.
+    //
+    // fake_packet is excluded: in SOCKS mode fake data travels on the same
+    // TCP stream and reaches the server, breaking TLS. It only works in
+    // NFQUEUE mode where packets can have TTL=1.
+    let mut probe_variants: Vec<(String, TechniqueConfig)> = Vec::new();
+    for simple in ["tcp_split", "tls_record_frag", "disorder", "sni_manip"] {
+        probe_variants.push((
+            simple.to_string(),
+            TechniqueConfig {
+                name: simple.to_string(),
+                split_position: Some(SplitPosition::Sni),
                 enabled: true,
                 fake_type: None,
                 sni_mode: None,
+                fragments: None,
                 host_mode: None,
                 stealth: None,
                 l7_filter: None,
-            }],
+            },
+        ));
+    }
+    // Fragment-count sweep for multi_stream_frag. Let the adapt engine
+    // pick the smallest `n` that actually beats the DPI in use.
+    for n in [2usize, 3, 4] {
+        probe_variants.push((
+            format!("multi_stream_frag_n{}", n),
+            TechniqueConfig {
+                name: "multi_stream_frag".to_string(),
+                split_position: Some(SplitPosition::Sni),
+                enabled: true,
+                fake_type: None,
+                sni_mode: None,
+                fragments: Some(n),
+                host_mode: None,
+                stealth: None,
+                l7_filter: None,
+            },
+        ));
+    }
+
+    let mut winners: Vec<(String, TechniqueConfig, f64)> = Vec::new();
+
+    for (label, tech_cfg) in &probe_variants {
+        let strategy = Strategy {
+            name: format!("probe_{}", label),
+            techniques: vec![tech_cfg.clone()],
         };
 
         let result = probe::probe_domain_ex(domain, port, Some(&strategy), timeout, secure_dns).await;
@@ -196,24 +223,27 @@ pub async fn find_best_strategy(
         let _ = engine.store.save_test_result(
             domain,
             None,
-            Some(tech_name),
+            Some(label.as_str()),
             result.success,
             Some(result.latency.as_millis() as i64),
             result.error.as_deref(),
         );
 
-        all_probes.push((tech_name.to_string(), result.clone()));
+        all_probes.push((label.clone(), result.clone()));
 
         if result.success {
-            winners.push((tech_name.to_string(), split_pos.clone(), score));
-            debug!(technique = tech_name, score, "technique succeeded");
+            winners.push((label.clone(), tech_cfg.clone(), score));
+            debug!(technique = %label, score, "technique succeeded");
         }
 
         // Rate limiting between probes.
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // Step 3: Parameter variations for winners.
+    // Step 3: Split-position variations for winners. We clone the winning
+    // TechniqueConfig (carrying its fragment count / other params) and
+    // only vary the split_position, so we find the best (technique +
+    // fragments + split_position) triple instead of dropping fragment info.
     let split_variations = [
         SplitPosition::Sni,
         SplitPosition::SniOffset(-1),
@@ -227,31 +257,25 @@ pub async fn find_best_strategy(
     let mut best_score: f64 = 0.0;
     let mut best_strategy: Option<Strategy> = None;
 
-    'outer: for (tech_name, _, _) in &winners {
+    'outer: for (label, winner_cfg, _) in &winners {
         for split_pos in &split_variations {
             // Skip if we already tested this combination.
             if matches!(split_pos, SplitPosition::Sni) {
                 continue; // Already tested in step 2.
             }
 
+            let mut varied_cfg = winner_cfg.clone();
+            varied_cfg.split_position = Some(split_pos.clone());
+
             let strategy = Strategy {
-                name: format!("probe_{}_{:?}", tech_name, split_pos),
-                techniques: vec![TechniqueConfig {
-                    name: tech_name.clone(),
-                    split_position: Some(split_pos.clone()),
-                    enabled: true,
-                    fake_type: None,
-                    sni_mode: None,
-                    host_mode: None,
-                    stealth: None,
-                    l7_filter: None,
-                }],
+                name: format!("probe_{}_{:?}", label, split_pos),
+                techniques: vec![varied_cfg],
             };
 
             let result = probe::probe_domain_ex(domain, port, Some(&strategy), timeout, secure_dns).await;
             let score = compute_score(&result);
-            let label = format!("{}+{:?}", tech_name, split_pos);
-            all_probes.push((label, result.clone()));
+            let variant_label = format!("{}+{:?}", label, split_pos);
+            all_probes.push((variant_label, result.clone()));
 
             if result.success && score > best_score {
                 best_score = score;
@@ -267,22 +291,13 @@ pub async fn find_best_strategy(
         }
     }
 
-    // If no variation beat the original winners, use the first winner.
+    // If no variation beat the original winners, use the first winner as-is.
     if best_strategy.is_none() && !winners.is_empty() {
-        let (tech_name, split_pos, score) = &winners[0];
+        let (label, winner_cfg, score) = &winners[0];
         best_score = *score;
         best_strategy = Some(Strategy {
-            name: format!("auto_{}_{}", domain, tech_name),
-            techniques: vec![TechniqueConfig {
-                name: tech_name.clone(),
-                split_position: Some(split_pos.clone()),
-                enabled: true,
-                fake_type: None,
-                sni_mode: None,
-                host_mode: None,
-                stealth: None,
-                l7_filter: None,
-            }],
+            name: format!("auto_{}_{}", domain, label),
+            techniques: vec![winner_cfg.clone()],
         });
     }
 
@@ -318,6 +333,7 @@ pub async fn find_best_strategy(
                     enabled: true,
                     fake_type: None,
                     sni_mode: None,
+                    fragments: None,
                     host_mode: None,
                     stealth: stealth_config.clone(),
                     l7_filter: None,

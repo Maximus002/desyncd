@@ -670,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-adapt"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "desyncd-desync",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-cli"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-config"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-desync"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "desyncd-packet",
  "desyncd-types",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-dns"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "fastrand",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-gui"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "desyncd-adapt",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-nfq"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "desyncd-desync",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-packet"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "desyncd-types",
  "tracing",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-platform"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-proxy"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-store"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "desyncd-desync",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-strategy"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "desyncd-desync",
  "desyncd-types",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "desyncd-types"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "clap",
  "serde",

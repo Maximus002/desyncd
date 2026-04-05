@@ -85,6 +85,12 @@ pub async fn handle_client(
     let atyp = req_hdr[3];
 
     if cmd != CMD_CONNECT {
+        // Only CONNECT (0x01) is supported — not BIND (0x02), not
+        // UDP_ASSOCIATE (0x03). This is deliberate: rejecting UDP_ASSOCIATE
+        // forces Chromium-based browsers to abandon QUIC / HTTP/3 for the
+        // destination and fall back to TCP+TLS, where our desync techniques
+        // apply. QUIC traffic through a SOCKS proxy would bypass our
+        // pipeline entirely and be exposed to DPI.
         send_reply(&mut client, REPLY_CMD_NOT_SUPPORTED, atyp).await?;
         anyhow::bail!("unsupported command: {}", cmd);
     }

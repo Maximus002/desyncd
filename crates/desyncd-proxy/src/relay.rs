@@ -26,10 +26,19 @@ use tracing::{debug, info, trace};
 
 use crate::connstate::ConnState;
 
-/// How long to wait for upstream to respond (or RST) after sending the desynced
-/// first payload. If we see RST within this window, we assume DPI blocked the
-/// connection and try the next fallback technique (byedpi-style auto-retry).
-const EARLY_RST_WINDOW: Duration = Duration::from_millis(600);
+/// How long to wait for the upstream to respond after sending the first
+/// payload. Within this window we classify the outcome as:
+///   - Data → success
+///   - Rst  → definite failure, retry with fallback
+///   - Quiet (after PassThrough) → probable silent drop, retry with fallback
+///   - Quiet (after a real desync) → keep the connection, server may be slow
+///
+/// 800 ms is chosen so that: (a) healthy CDN servers comfortably respond in
+/// time (most reply with ServerHello in 100–400 ms), (b) we still switch to
+/// the fallback fast enough that the browser doesn't bail out, and (c) we
+/// tolerate the occasional 500–700 ms outlier without triggering an
+/// unnecessary reconnect.
+const EARLY_RST_WINDOW: Duration = Duration::from_millis(800);
 
 /// Maximum buffer size for first-packet reassembly (64KB).
 /// A typical ClientHello is 200-600 bytes; Firefox/Chrome can be ~700 bytes
@@ -82,36 +91,78 @@ pub async fn relay_with_desync(
     let ctx = PayloadContext::new(first_buf);
     let action = selector.apply(&ctx).unwrap_or(DesyncAction::PassThrough);
 
+    // Track whether we actually applied a desync transform. If the action
+    // was PassThrough, we sent the ClientHello unchanged — meaning any
+    // subsequent silence from the upstream is almost certainly DPI dropping
+    // our packet (Russian ТСПУ, for example, silently drops rather than
+    // injecting RST). In that case we want the fallback chain to kick in
+    // just like on an RST.
+    let was_passthrough = matches!(action, DesyncAction::PassThrough);
+
     log_action(&action, &ctx, domain, &state);
 
     crate::action::execute_action(&action, &ctx.payload, &mut upstream, stealth).await?;
     state.add_bytes_sent(ctx.payload.len() as u64);
 
-    // --- Auto-retry on early RST (byedpi-style --auto=torst) ---
+    // --- Auto-retry on early failure (byedpi-style --auto=torst) ---
     //
     // If the operator configured a fallback chain, we wait briefly for the
-    // upstream to either send data (success) or reset (DPI blocked). On reset,
-    // we drop the upstream, reconnect, and re-apply the next fallback
-    // technique to the SAME ClientHello. The retry is transparent to the
-    // client — it keeps its TCP connection.
+    // upstream to either send data (success), reset (DPI blocked), or stay
+    // silent. On reset — or on silence following a PassThrough — we drop the
+    // upstream, reconnect, and re-apply the next fallback technique to the
+    // SAME ClientHello. The retry is transparent to the client.
     let fallback = selector.auto_retry_fallback();
     let mut seed_data: Vec<u8> = Vec::new();
     if !fallback.is_empty() {
-        match detect_early_rst(&mut upstream).await {
-            EarlyResult::Rst => {
-                if let Some(new_upstream) = try_fallback_chain(
+        let early = detect_early_rst(&mut upstream).await;
+
+        // Decide whether this early result warrants a fallback attempt.
+        //   Rst                     → always retry (primary definitely failed).
+        //   Quiet + was_passthrough → retry (silent drop on a no-op strategy).
+        //   Quiet + real desync     → don't retry (server may be slow; our
+        //                              desync may still be working).
+        //   Data                    → success, forward the bytes.
+        //   Error                   → transient, don't retry.
+        let should_retry = matches!(early, EarlyResult::Rst)
+            || (was_passthrough && matches!(early, EarlyResult::Quiet));
+
+        match early {
+            EarlyResult::Data(buf) => {
+                // Upstream already sent bytes. Preserve them so the
+                // downstream relay loop doesn't lose them.
+                state.mark_upstream_responded();
+                state.add_bytes_received(buf.len() as u64);
+                seed_data = buf;
+            }
+            _ if should_retry => {
+                let reason = if matches!(early, EarlyResult::Rst) {
+                    "upstream reset"
+                } else {
+                    "silent drop after passthrough"
+                };
+                debug!(?domain, reason, "auto-retry: triggering fallback chain");
+                if let Some((new_upstream, new_seed)) = try_fallback_chain(
                     target_addr, &ctx, fallback, stealth, domain,
                 )
                 .await
                 {
                     upstream = new_upstream;
                     state.mark_desync_applied();
+                    // If the fallback already received ServerHello bytes,
+                    // carry them forward so the main relay loop can forward
+                    // them to the client instead of re-reading from the socket.
+                    if !new_seed.is_empty() {
+                        state.mark_upstream_responded();
+                        state.add_bytes_received(new_seed.len() as u64);
+                        seed_data = new_seed;
+                    }
                     // Remember this domain so future connections skip the
                     // failed primary and apply the fallback directly.
                     if let Some(d) = domain {
                         if selector.learned_blocked().insert(d) {
                             info!(
                                 domain = d,
+                                reason,
                                 learned_count = selector.learned_blocked().len(),
                                 "hostlist-auto: learned new blocked domain"
                             );
@@ -123,16 +174,9 @@ pub async fn relay_with_desync(
                     // client will see a connection reset — same as today.
                 }
             }
-            EarlyResult::Data(buf) => {
-                // Upstream already sent bytes. We have to preserve them so the
-                // downstream relay loop doesn't lose them.
-                state.mark_upstream_responded();
-                state.add_bytes_received(buf.len() as u64);
-                seed_data = buf;
-            }
-            EarlyResult::Quiet | EarlyResult::Error => {
-                // Silent for the whole window (slow server, non-HTTPS handshake,
-                // etc.) — no retry, proceed normally.
+            _ => {
+                // Quiet after a real desync, or transient Error.
+                // Proceed normally — don't disrupt a slow but working handshake.
             }
         }
     }
@@ -278,15 +322,16 @@ async fn detect_early_rst(upstream: &mut TcpStream) -> EarlyResult {
 }
 
 /// Reconnect and try each fallback technique in order. Returns the new
-/// upstream socket if any fallback both sends payload and survives the
-/// RST-detection window.
+/// upstream socket (and any bytes the server already sent during the
+/// RST-detection window) if any fallback both sends payload and survives
+/// the early-failure window.
 async fn try_fallback_chain(
     target_addr: SocketAddr,
     ctx: &PayloadContext,
     fallback: &[TechniqueConfig],
     stealth: Option<&StealthConfig>,
     domain: Option<&str>,
-) -> Option<TcpStream> {
+) -> Option<(TcpStream, Vec<u8>)> {
     for (i, tech) in fallback.iter().enumerate() {
         debug!(?domain, idx = i, technique = %tech.name, "auto-retry: trying fallback");
         let mut upstream = match TcpStream::connect(target_addr).await {
@@ -326,14 +371,32 @@ async fn try_fallback_chain(
                 debug!(?domain, technique = %tech.name, "auto-retry: fallback also reset");
                 continue;
             }
-            EarlyResult::Data(_) | EarlyResult::Quiet | EarlyResult::Error => {
-                // Quiet means the server may still be processing. We accept it
-                // — the primary already RST'd, so "quiet" is an improvement.
-                // Data means the server responded — clear win.
-                // Error is transient; we keep the socket and let the main loop
-                // surface the final outcome.
-                info!(?domain, technique = %tech.name, "auto-retry: fallback succeeded");
-                return Some(upstream);
+            EarlyResult::Data(buf) => {
+                // Upstream actually sent ServerHello (or similar) — unambiguous
+                // success. We need to preserve these bytes so the caller can
+                // flush them to the client before entering the main relay loop.
+                info!(
+                    ?domain,
+                    technique = %tech.name,
+                    first_bytes = buf.len(),
+                    "auto-retry: fallback succeeded (upstream responded)"
+                );
+                return Some((upstream, buf));
+            }
+            EarlyResult::Quiet => {
+                // Quiet means the server MAY still be processing. We accept it
+                // because the primary already failed, so "quiet" is at worst
+                // an equivalent outcome and at best a slow handshake.
+                info!(
+                    ?domain,
+                    technique = %tech.name,
+                    "auto-retry: fallback accepted (quiet window, no data yet)"
+                );
+                return Some((upstream, Vec::new()));
+            }
+            EarlyResult::Error => {
+                debug!(?domain, technique = %tech.name, "auto-retry: transient error");
+                continue;
             }
         }
     }
