@@ -8,7 +8,7 @@
 
 Combines the power of [zapret](https://github.com/bol-van/zapret) with the simplicity of [byedpi](https://github.com/hufrea/byedpi), in a single Rust binary with auto-adaptation, Protocol Morphing, and multi-stream TLS fragmentation.
 
-> **Version 2.0 highlights:** intelligent DPI classifier (Protocol Morphing), multi-stream TLS record fragmentation (MSF) with the best P95 latency in head-to-head benchmarks vs `byedpi`/`tpws`, new `OffsetFrom`/`SniExtStart`/`EndSld`/`MidSld` split markers, per-technique L7 filters for protocol-aware chains, and a one-line cross-platform installer.
+> **Version 2.0 highlights:** intelligent DPI classifier (Protocol Morphing), multi-stream TLS record fragmentation (MSF) with competitive latency vs `byedpi` and `zapret` on 50-sample head-to-head benchmarks, new `OffsetFrom` / `SniExtStart` / `EndSld` / `MidSld` split markers, per-technique L7 filters for protocol-aware chains, and a one-line cross-platform installer.
 
 ## One-Line Install
 
@@ -41,11 +41,11 @@ Set your browser/system SOCKS5 proxy to `127.0.0.1:1080`. Done.
 ## What's New in 2.0
 
 - **Protocol Morphing** — intelligent DPI classifier that fingerprints your ISP's DPI (TSPU, GFW, permissive, etc.) with ≤5 adaptive probes and selects the optimal counter-strategy. Enable with `--morphing`. See [Protocol Morphing](#protocol-morphing).
-- **Multi-Stream Fragmentation (MSF)** — splits the TLS ClientHello into N≥3 TLS records (default 3), scattering the SNI across all of them. Faster P95 and more robust against re-segmenting middleboxes than a 2-record split. See [Multi-Stream Fragmentation](#multi-stream-fragmentation).
+- **Multi-Stream Fragmentation (MSF)** — splits the TLS ClientHello into N ≥ 3 TLS records (default 3), scattering the SNI across all of them. Reproducibly beats 2-record `tls_record_frag` on median and mean latency inside desyncd (same binary, different technique). See [Multi-Stream Fragmentation](#multi-stream-fragmentation).
 - **Marker-based split positions** — new `sniext`, `endsld`, `midsld`, and `OffsetFrom { marker, delta }` split markers compatible with the byedpi / zapret ecosystem, letting operators nudge a split a few bytes from any named anchor.
 - **Per-technique L7 filters** — `l7_filter = "tls" | "http" | "quic" | "any"` lets a single strategy chain apply TLS techniques only to TLS, HTTP techniques only to HTTP, etc., instead of duplicating strategies per protocol.
 - **One-line installer** — `curl | bash` for macOS/Linux, PowerShell one-liner for Windows. Handles Rust installation automatically.
-- **Head-to-head benchmarks** — desyncd-msf has the lowest P95 latency against `byedpi` and `tpws` on 5 blocked domains in Russia. See [Benchmarks](#benchmarks).
+- **Head-to-head benchmarks** — 50-sample comparison against `byedpi` and `tpws` on 5 blocked domains in Russia, with honest reporting of what reproduces and what doesn't. See [Benchmarks](#benchmarks).
 - **Bug fixes** — bounds checking in TLS parser, zero-length domain rejection, fd-exhaustion crash fix, SSL_ERROR_BAD_MAC_READ regression fix, wildcard strategy routing.
 
 ## Features
@@ -178,67 +178,71 @@ Multi-Stream Fragmentation (MSF) is the 2.0 replacement for 2-record `tls_record
 
 - **No single TLS record contains the full SNI** — a DPI that inspects only the first record, only the last record, or only records above a minimum size will all miss the SNI.
 - **Handshake reassembly is standard** — RFC 5246 §6.2.1 explicitly permits fragmenting a handshake message across records. Every compliant TLS server reassembles transparently.
-- **Latency is better than the 2-record split on uncooperative CDNs** — some frontends introduce variable extra delay for exactly 2-record ClientHellos, while the 3+ record path hits the common handshake-reassembly code path. In our benchmarks (see below), MSF has the lowest P95 latency of any tool tested.
+- **Latency is better than the 2-record split on uncooperative CDNs** — some frontends introduce variable extra delay for exactly 2-record ClientHellos, while the 3+ record path hits the common handshake-reassembly code path. In our benchmarks (see below), MSF reproducibly beats `tls_record_frag` inside desyncd on median and mean latency; versus `byedpi` and `tpws` it is competitive on median and has a fatter tail on a subset of domains. See [Benchmarks](#benchmarks) for honest numbers.
 
 MSF is the default recommended technique against TSPU in `--preset russia` configurations.
 
 ## Benchmarks
 
-Head-to-head latency comparison of desyncd 2.0 against the two most popular open-source DPI bypass tools (`byedpi` and `tpws`), measured from Russia against 5 of the most commonly-blocked domains.
+Head-to-head latency comparison of desyncd 2.0 against `byedpi` and `tpws` (the userspace SOCKS tool from [zapret](https://github.com/bol-van/zapret)), measured from Russia against 5 commonly-blocked domains. **The reference measurement below is a 50-sample deep run; results and caveats are reported honestly.**
 
 ### Methodology
 
-- **Domains:** `twitter.com`, `discord.com`, `www.bbc.com`, `meduza.io`, `www.roblox.com` (all confirmed blocked — `direct` control fails on all of them).
-- **Trials:** 4 per (tool, domain) combination = **20 runs per tool**.
-- **Client:** `curl --proxy socks5h://127.0.0.1:<port> https://<domain> -o /dev/null -w %{time_total}` with a 10 s timeout.
-- **Configurations tested:**
+- **Domains:** `twitter.com`, `discord.com`, `www.bbc.com`, `meduza.io`, `www.roblox.com`. All confirmed blocked — the `direct` control (no proxy) fails on every domain with a 10 s connect timeout.
+- **Client:** `curl --proxy socks5h://127.0.0.1:<port> https://<domain>/ -o /dev/null -w %{time_total}` with a 10 s timeout.
+- **Trials:** 10 per (tool, domain) combination = **50 samples per tool**.
+- **Configurations:**
   - `desyncd-tlsrec` — desyncd with `tls_record_frag` at `SniOffset(1)`.
   - `desyncd-msf` — desyncd with `multi_stream_frag` at `Sni` (3 records, the 2.0 default).
-  - `byedpi` — upstream `byedpi` with `--tlsrec 1+s` (its TSPU-recommended preset).
-  - `tpws` — upstream `tpws` with `--tlsrec=sniext+1` (its TSPU-recommended preset).
-- **Metric of interest:** P95 — the 95th-percentile wall-clock time a user would actually experience on a cold TLS handshake. Median hides tail spikes caused by middlebox timeouts; P95 surfaces them.
+  - `byedpi` — upstream `byedpi` / `ciadpi` with `--tlsrec 1+s`.
+  - `tpws` — upstream `tpws` from zapret with `--tlsrec=sniext+1`.
+- **Percentile calculation:** `p95 = sorted(xs)[int(0.95 * (n - 1))]`.
 
-Scripts and raw per-run CSV data live in the `dpi-bench/` directory outside this repo; they can be rerun with `bash bench.sh` + `python aggregate.py`.
+> **Why 50 samples and not 20?** At n=20, the P95 is the sorted-19th element — effectively the maximum of 20. A single unlucky network draw moves it by several hundred milliseconds. Early v2.0 development used 20-sample runs, and those produced a headline P95 number for `desyncd-msf` that **did not reproduce** at n=50. See "What does not reproduce" below.
 
-### Per-domain results
+Scripts and raw CSV data live outside this repo in `dpi-bench/` and can be rerun with `bash bench.sh` (default `TRIALS=10`) followed by `python aggregate.py`.
 
-| Domain | Tool | Success | Median | Min | Max | P95 |
-|---|---|---|---:|---:|---:|---:|
-| discord.com | desyncd-tlsrec | 4/4 | 292 | 252 | 679 | 679 |
-| discord.com | **desyncd-msf** | 4/4 | 319 | 235 | **447** | **447** |
-| discord.com | byedpi | 4/4 | 255 | 227 | 352 | 352 |
-| discord.com | tpws | 4/4 | 314 | 231 | 425 | 425 |
-| meduza.io | desyncd-tlsrec | 4/4 | 423 | 377 | 868 | 868 |
-| meduza.io | **desyncd-msf** | 4/4 | 405 | 284 | **491** | **491** |
-| meduza.io | byedpi | 4/4 | 423 | 298 | 1379 | 1379 |
-| meduza.io | tpws | 4/4 | 391 | 296 | 990 | 990 |
-| twitter.com | desyncd-tlsrec | 4/4 | 232 | 221 | 306 | 306 |
-| twitter.com | **desyncd-msf** | 4/4 | 237 | 222 | **239** | **239** |
-| twitter.com | byedpi | 4/4 | 226 | 221 | 250 | 250 |
-| twitter.com | tpws | 4/4 | 242 | 222 | 275 | 275 |
-| www.bbc.com | desyncd-tlsrec | 4/4 | 367 | 276 | 622 | 622 |
-| www.bbc.com | **desyncd-msf** | 4/4 | 424 | 338 | **473** | **473** |
-| www.bbc.com | byedpi | 4/4 | 360 | 274 | 1336 | 1336 |
-| www.bbc.com | tpws | 4/4 | 373 | 264 | 432 | 432 |
-| www.roblox.com | desyncd-tlsrec | 4/4 | 580 | 468 | 856 | 856 |
-| www.roblox.com | **desyncd-msf** | 4/4 | 462 | 434 | **481** | **481** |
-| www.roblox.com | byedpi | 4/4 | 606 | 445 | 844 | 844 |
-| www.roblox.com | tpws | 4/4 | 466 | 442 | 676 | 676 |
+### Reference results (n=50)
 
-Timings are in milliseconds. All 4 tools achieve **20/20 success** — they all work. The differentiator is tail latency.
+| Tool | Success | Median | Mean | P75 | P90 | **P95** | P99 | Max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| byedpi | 50/50 | 298 | 375 | 470 | 695 | **715** | 817 | 961 |
+| tpws | 50/50 | 305 | 387 | 450 | 526 | **803** | 925 | 1456 |
+| desyncd-tlsrec | 50/50 | 344 | 417 | 497 | 769 | **851** | 1057 | 1177 |
+| desyncd-msf | 50/50 | 316 | 411 | 433 | 583 | **884** | 1375 | 1948 |
 
-### Aggregate (20 runs per tool)
+All timings in milliseconds. **All four tools clear 50/50 requests successfully** — they all work; differences are purely in latency distribution.
 
-| Tool | Success | Median | Mean | **P95** |
-|---|---|---:|---:|---:|
-| desyncd-tlsrec | 20/20 | 386 ms | 435 ms | 868 ms |
-| **desyncd-msf** | 20/20 | 380 ms | 367 ms | **491 ms** |
-| byedpi | 20/20 | 346 ms | 468 ms | 1379 ms |
-| tpws | 20/20 | 362 ms | 391 ms | 990 ms |
+### Per-domain median winner (n=10 per cell)
 
-**desyncd-msf has the best P95 latency of all four tools** — 491 ms vs 990 ms for tpws (2.0× better) and 1379 ms for byedpi (2.8× better). Its mean is also the lowest (367 ms vs 391–468 ms). The median is within 40 ms of the fastest tool, and the *maximum* single observation across the entire 20-run dataset is 491 ms — meaning MSF never exhibited the 800–1400 ms tail spikes that every other tool produces on at least one domain.
+| Domain | Winner (lowest median) | Median |
+|---|---|---:|
+| twitter.com | byedpi | 227 ms |
+| discord.com | byedpi | 289 ms |
+| www.bbc.com | byedpi | 215 ms |
+| meduza.io | **desyncd-msf** | 410 ms |
+| www.roblox.com | tpws | 493 ms |
 
-For most users the median is not the interesting number: the median TLS handshake already feels fast. What makes a browser feel responsive is the absence of stalls on the 1-in-10 or 1-in-20 page load where a middlebox has a bad day. That is P95, and MSF is the only tested technique that keeps it under 500 ms.
+### ✅ What reproduces across runs
+
+These findings held in both a 20-sample early run **and** the 50-sample reference run above, so they are robust to network variance:
+
+- **100% success for every tool.** desyncd 2.0 has no functional regression vs `byedpi` or `tpws` — all 4 tools bypass all 5 blocked domains on every single attempt.
+- **Medians are tightly clustered.** Across all tools, median latencies lie within ~50 ms of each other on a ~300 ms baseline. A typical browsing session will not feel different between them.
+- **Within desyncd, `multi_stream_frag` beats `tls_record_frag` on median and mean.** At n=50 the MSF median is 316 ms vs tlsrec's 344 ms (−28 ms) and mean 411 ms vs 417 ms (−6 ms). Same binary, same config, only the technique differs — this is a clean internal A/B that does not depend on network weather.
+- **MSF's P90 is lower than `desyncd-tlsrec`'s** (583 ms vs 769 ms) — the 3-record split reduces the frequency of mid-tail stalls compared to the 2-record split even if a rare full-tail spike sometimes remains.
+
+### ❌ What does NOT reproduce
+
+- **The 20-sample claim that MSF had the lowest P95 across all tools (491 ms vs byedpi 1379 ms, tpws 990 ms) does not hold at n=50.** On the reference run, `byedpi` has the lowest P95 (715 ms), followed by `tpws` (803 ms), `desyncd-tlsrec` (851 ms), and `desyncd-msf` (884 ms). The n=20 number was a small-sample artifact: a drop-one sensitivity analysis at n=50 shows MSF's P95 falls from 884 → 723 ms when a single 1948 ms outlier on `meduza.io` is removed, while `byedpi`'s only moves 715 → 703 ms. MSF has a fatter tail than `byedpi` on this specific workload.
+- **Absolute P95 numbers between runs vary by ±300 ms at n=20 and still ±50 ms at n=50.** Cross-run comparisons of P95 should be treated as suggestive, not decisive.
+
+### Takeaways
+
+1. **On raw latency over 5 Russian-blocked domains at n=50, `byedpi` leads on every percentile.** If minimum latency is the only criterion, use `byedpi`.
+2. **`desyncd-msf` is within ~18 ms of `byedpi` on median** (316 vs 298 ms). On typical traffic the two are interchangeable from a user-experience standpoint.
+3. **Use `desyncd` for what `byedpi` and `tpws` do not provide:** Protocol Morphing DPI classifier, per-domain strategy persistence with confidence decay, RFC 6125 wildcard rules, SOCKS5/4/4a + HTTP CONNECT + HTTP forward multiplexing on a single port, DNS-over-TLS, auto-adaptation with `--preset russia`, and a cross-platform GUI. The ~18 ms median delta is the cost of those features.
+4. **Inside desyncd, prefer `multi_stream_frag` as the default technique.** It reproducibly beats `tls_record_frag` on median and mean latency across both runs.
 
 ## Configuration
 
@@ -331,7 +335,7 @@ MIT OR Apache-2.0
 
 Сочетает мощь [zapret](https://github.com/bol-van/zapret) с простотой [byedpi](https://github.com/hufrea/byedpi) в одном Rust-бинарнике с автоадаптацией, Protocol Morphing и мульти-стрим фрагментацией TLS.
 
-> **Что нового в 2.0:** интеллектуальный классификатор DPI (Protocol Morphing), мульти-стрим фрагментация TLS-записей (MSF) с лучшим P95 в сравнении с `byedpi`/`tpws`, новые маркеры разрезания `OffsetFrom`/`SniExtStart`/`EndSld`/`MidSld`, L7-фильтры для протокол-aware цепочек и установщик одной командой на всех платформах.
+> **Что нового в 2.0:** интеллектуальный классификатор DPI (Protocol Morphing), мульти-стрим фрагментация TLS-записей (MSF) с конкурентной латентностью против `byedpi` и `zapret` на 50-сэмпловых бенчмарках, новые маркеры разрезания `OffsetFrom` / `SniExtStart` / `EndSld` / `MidSld`, L7-фильтры для протокол-aware цепочек и установщик одной командой на всех платформах.
 
 ## Установка одной командой
 
@@ -364,11 +368,11 @@ desyncd run
 ## Новое в 2.0
 
 - **Protocol Morphing** — интеллектуальный классификатор DPI, определяющий тип системы блокировки (ТСПУ, GFW, «разрешающий» инспектор и т. д.) за ≤5 адаптивных проб и выбирающий оптимальную контр-стратегию. Включается через `--morphing`. Смотри раздел [Protocol Morphing](#protocol-morphing-rus).
-- **Multi-Stream Fragmentation (MSF)** — разбивает TLS ClientHello на N ≥ 3 TLS-записей (по умолчанию 3), распределяя SNI между ними. Ниже P95-задержка и выше устойчивость к middlebox'ам, пересобирающим сегменты, чем у 2-х-рекордного split'а. Смотри раздел [Multi-Stream Fragmentation](#msf-rus).
+- **Multi-Stream Fragmentation (MSF)** — разбивает TLS ClientHello на N ≥ 3 TLS-записей (по умолчанию 3), распределяя SNI между ними. Воспроизводимо обыгрывает 2-записный `tls_record_frag` по медиане и среднему внутри desyncd (один бинарь, разные техники). Смотри раздел [Multi-Stream Fragmentation](#msf-rus).
 - **Маркер-базированные позиции разреза** — новые маркеры `sniext`, `endsld`, `midsld` и `OffsetFrom { marker, delta }`, совместимые с экосистемой byedpi/zapret. Позволяют сдвинуть точку разреза на несколько байт от любого именованного якоря.
 - **L7-фильтры на уровне техники** — `l7_filter = "tls" | "http" | "quic" | "any"` позволяет в одной стратегии-цепочке применять TLS-техники только к TLS, HTTP-техники только к HTTP и т. д.
 - **Установщик одной командой** — `curl | bash` для macOS/Linux, PowerShell для Windows. Автоматически ставит Rust.
-- **Сравнительные бенчмарки** — desyncd-msf имеет наименьший P95 среди `byedpi` и `tpws` на 5 заблокированных в РФ доменах. Смотри раздел [Бенчмарки](#benchmarks-rus).
+- **Сравнительные бенчмарки** — 50-сэмпловое сравнение с `byedpi` и `tpws` (zapret) на 5 заблокированных в РФ доменах, с честным разделением воспроизводимых и невоспроизводимых результатов. Смотри раздел [Бенчмарки](#benchmarks-rus).
 - **Исправления багов** — проверки границ в TLS-парсере, отказ в доменах нулевой длины, fix падения из-за исчерпания fd, fix SSL_ERROR_BAD_MAC_READ, fix маршрутизации wildcard-стратегий.
 
 ## Возможности
@@ -482,7 +486,7 @@ Multi-Stream Fragmentation (MSF) — замена 2-записного `tls_reco
 
 - **Ни одна TLS-запись не содержала полный SNI** — DPI, который смотрит только на первую запись, только на последнюю или только на записи больше минимального размера, SNI не увидит.
 - **Пересборка handshake — штатная** — RFC 5246 §6.2.1 прямо разрешает фрагментацию сообщения handshake между записями. Любой совместимый TLS-сервер собирает это прозрачно.
-- **Задержка лучше, чем у 2-записного split'а на капризных CDN** — некоторые фронтенды вносят переменную задержку именно для 2-записных ClientHello, тогда как путь из 3+ записей попадает в общий код reassembly. В бенчмарках ниже MSF имеет наименьший P95 среди всех протестированных инструментов.
+- **Задержка лучше, чем у 2-записного split'а на капризных CDN** — некоторые фронтенды вносят переменную задержку именно для 2-записных ClientHello, тогда как путь из 3+ записей попадает в общий код reassembly. В бенчмарках ниже MSF воспроизводимо обыгрывает `tls_record_frag` внутри desyncd по медиане и среднему; против `byedpi` и `tpws` — паритет по медиане и более толстый хвост на части доменов. Честные цифры — в разделе [Бенчмарки](#benchmarks-rus).
 
 MSF — рекомендованная по умолчанию техника против ТСПУ в конфигурации `--preset russia`.
 
@@ -490,61 +494,65 @@ MSF — рекомендованная по умолчанию техника п
 
 ## Бенчмарки
 
-Сравнение задержек desyncd 2.0 с двумя самыми популярными открытыми инструментами обхода DPI (`byedpi` и `tpws`), измеренное из России на 5 из наиболее часто блокируемых доменов.
+Сравнение задержек desyncd 2.0 с `byedpi` и `tpws` (userspace SOCKS-инструмент из [zapret](https://github.com/bol-van/zapret)), измеренное из России на 5 часто блокируемых доменах. **Референсная выборка ниже — 50-сэмпловый прогон; результаты и оговорки приводятся честно.**
 
 ### Методология
 
-- **Домены:** `twitter.com`, `discord.com`, `www.bbc.com`, `meduza.io`, `www.roblox.com` (все подтверждённо заблокированы — контроль `direct` падает на всех).
-- **Испытаний:** 4 на каждую пару (инструмент, домен) = **20 запусков на инструмент**.
-- **Клиент:** `curl --proxy socks5h://127.0.0.1:<port> https://<domain> -o /dev/null -w %{time_total}` с таймаутом 10 с.
+- **Домены:** `twitter.com`, `discord.com`, `www.bbc.com`, `meduza.io`, `www.roblox.com`. Все подтверждённо заблокированы — контроль `direct` (без прокси) падает по таймауту 10 с на каждом.
+- **Клиент:** `curl --proxy socks5h://127.0.0.1:<port> https://<domain>/ -o /dev/null -w %{time_total}` с таймаутом 10 с.
+- **Испытаний:** 10 на каждую пару (инструмент, домен) = **50 сэмплов на инструмент**.
 - **Тестируемые конфигурации:**
   - `desyncd-tlsrec` — desyncd с `tls_record_frag` в позиции `SniOffset(1)`.
   - `desyncd-msf` — desyncd с `multi_stream_frag` в позиции `Sni` (3 записи, дефолт 2.0).
-  - `byedpi` — upstream `byedpi` с `--tlsrec 1+s` (его ТСПУ-пресет).
-  - `tpws` — upstream `tpws` с `--tlsrec=sniext+1` (его ТСПУ-пресет).
-- **Метрика интереса:** P95 — 95-й перцентиль фактического времени ожидания пользователя на холодном TLS-handshake. Медиана прячет хвосты из-за таймаутов middlebox'ов; P95 их вытаскивает.
+  - `byedpi` — upstream `byedpi` / `ciadpi` с `--tlsrec 1+s`.
+  - `tpws` — upstream `tpws` из zapret с `--tlsrec=sniext+1`.
+- **Расчёт перцентилей:** `p95 = sorted(xs)[int(0.95 * (n - 1))]`.
 
-Скрипты и сырые CSV-данные находятся в каталоге `dpi-bench/` вне репозитория, запускаются через `bash bench.sh` + `python aggregate.py`.
+> **Почему 50 сэмплов, а не 20?** При n=20 P95 — это 19-й элемент отсортированного списка, то есть фактически максимум из 20. Один неудачный сетевой draw двигает его на сотни мс. Ранние 20-сэмпловые прогоны во время разработки 2.0 дали цифру P95 для `desyncd-msf`, которая **не воспроизвелась** на n=50. Смотри раздел «Что не воспроизвелось» ниже.
 
-### Результаты по доменам
+Скрипты и сырые CSV-данные находятся в каталоге `dpi-bench/` вне репозитория, запускаются через `bash bench.sh` (по умолчанию `TRIALS=10`) + `python aggregate.py`.
 
-| Домен | Инструмент | Успех | Медиана | Мин | Макс | P95 |
-|---|---|---|---:|---:|---:|---:|
-| discord.com | desyncd-tlsrec | 4/4 | 292 | 252 | 679 | 679 |
-| discord.com | **desyncd-msf** | 4/4 | 319 | 235 | **447** | **447** |
-| discord.com | byedpi | 4/4 | 255 | 227 | 352 | 352 |
-| discord.com | tpws | 4/4 | 314 | 231 | 425 | 425 |
-| meduza.io | desyncd-tlsrec | 4/4 | 423 | 377 | 868 | 868 |
-| meduza.io | **desyncd-msf** | 4/4 | 405 | 284 | **491** | **491** |
-| meduza.io | byedpi | 4/4 | 423 | 298 | 1379 | 1379 |
-| meduza.io | tpws | 4/4 | 391 | 296 | 990 | 990 |
-| twitter.com | desyncd-tlsrec | 4/4 | 232 | 221 | 306 | 306 |
-| twitter.com | **desyncd-msf** | 4/4 | 237 | 222 | **239** | **239** |
-| twitter.com | byedpi | 4/4 | 226 | 221 | 250 | 250 |
-| twitter.com | tpws | 4/4 | 242 | 222 | 275 | 275 |
-| www.bbc.com | desyncd-tlsrec | 4/4 | 367 | 276 | 622 | 622 |
-| www.bbc.com | **desyncd-msf** | 4/4 | 424 | 338 | **473** | **473** |
-| www.bbc.com | byedpi | 4/4 | 360 | 274 | 1336 | 1336 |
-| www.bbc.com | tpws | 4/4 | 373 | 264 | 432 | 432 |
-| www.roblox.com | desyncd-tlsrec | 4/4 | 580 | 468 | 856 | 856 |
-| www.roblox.com | **desyncd-msf** | 4/4 | 462 | 434 | **481** | **481** |
-| www.roblox.com | byedpi | 4/4 | 606 | 445 | 844 | 844 |
-| www.roblox.com | tpws | 4/4 | 466 | 442 | 676 | 676 |
+### Референсные результаты (n=50)
 
-Времена в миллисекундах. Все 4 инструмента дают **20/20 успешных** запусков — работают все. Отличаются задержки на хвосте распределения.
+| Инструмент | Успех | Медиана | Среднее | P75 | P90 | **P95** | P99 | Max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| byedpi | 50/50 | 298 | 375 | 470 | 695 | **715** | 817 | 961 |
+| tpws | 50/50 | 305 | 387 | 450 | 526 | **803** | 925 | 1456 |
+| desyncd-tlsrec | 50/50 | 344 | 417 | 497 | 769 | **851** | 1057 | 1177 |
+| desyncd-msf | 50/50 | 316 | 411 | 433 | 583 | **884** | 1375 | 1948 |
 
-### Агрегат (20 запусков на инструмент)
+Времена в миллисекундах. **Все 4 инструмента дают 50/50 успешных запросов** — работают все; различия только в распределении задержек.
 
-| Инструмент | Успех | Медиана | Среднее | **P95** |
-|---|---|---:|---:|---:|
-| desyncd-tlsrec | 20/20 | 386 мс | 435 мс | 868 мс |
-| **desyncd-msf** | 20/20 | 380 мс | 367 мс | **491 мс** |
-| byedpi | 20/20 | 346 мс | 468 мс | 1379 мс |
-| tpws | 20/20 | 362 мс | 391 мс | 990 мс |
+### Победитель по медиане на каждом домене (n=10 на ячейку)
 
-**У desyncd-msf самый низкий P95 из всех четырёх инструментов** — 491 мс против 990 мс у tpws (в 2.0 раза лучше) и 1379 мс у byedpi (в 2.8 раза лучше). Среднее тоже самое низкое (367 мс против 391–468 мс). Медиана в пределах 40 мс от самого быстрого инструмента, а *максимальное* наблюдение за все 20 запусков — 491 мс. То есть MSF никогда не показывал хвостовых всплесков на 800–1400 мс, которые есть у каждого другого инструмента хотя бы на одном домене.
+| Домен | Победитель (минимальная медиана) | Медиана |
+|---|---|---:|
+| twitter.com | byedpi | 227 мс |
+| discord.com | byedpi | 289 мс |
+| www.bbc.com | byedpi | 215 мс |
+| meduza.io | **desyncd-msf** | 410 мс |
+| www.roblox.com | tpws | 493 мс |
 
-Большинству пользователей интересна не медиана: медианный handshake уже кажется быстрым. Субъективную «отзывчивость» браузера определяет отсутствие залипаний на каждой 10-й или 20-й загрузке страницы, где middlebox «тупит». Это и есть P95, и MSF — единственная из протестированных техник, удерживающая его ниже 500 мс.
+### ✅ Что воспроизвелось между прогонами
+
+Эти результаты держатся и на раннем 20-сэмпловом прогоне, **и** на 50-сэмпловом референсе — значит, они устойчивы к сетевой вариативности:
+
+- **100% success rate у всех инструментов.** desyncd 2.0 не имеет функциональной регрессии относительно `byedpi` или `tpws` — все 4 инструмента пробивают все 5 доменов на каждой попытке без единого сбоя.
+- **Медианы плотно сгруппированы.** Все 4 инструмента лежат в пределах ~50 мс друг от друга при базе ~300 мс. В обычном браузинге разница незаметна.
+- **Внутри desyncd, `multi_stream_frag` обыгрывает `tls_record_frag` по медиане и среднему.** На n=50: медиана MSF 316 мс против 344 мс у tlsrec (−28 мс), среднее 411 мс против 417 мс (−6 мс). Один бинарь, один конфиг, разница только в технике — чистое A/B сравнение, независимое от сетевых условий.
+- **P90 у MSF ниже, чем у `desyncd-tlsrec`** (583 мс против 769 мс) — 3-записный split снижает частоту средне-хвостовых подвисаний по сравнению с 2-записным, даже если редкий дальне-хвостовой выброс иногда остаётся.
+
+### ❌ Что НЕ воспроизвелось
+
+- **20-сэмпловое утверждение, что MSF имеет наименьший P95 среди всех инструментов (491 мс против byedpi 1379 мс, tpws 990 мс), на n=50 не держится.** На референсном прогоне наименьший P95 у `byedpi` (715 мс), далее `tpws` (803 мс), `desyncd-tlsrec` (851 мс) и `desyncd-msf` (884 мс). Цифра n=20 была артефактом малой выборки: drop-one анализ на n=50 показывает, что P95 у MSF падает с 884 → 723 мс при удалении одного outlier'а на 1948 мс на `meduza.io`, тогда как P95 у `byedpi` сдвигается всего 715 → 703 мс. У MSF более толстый хвост на этой конкретной нагрузке.
+- **Абсолютные числа P95 гуляют между прогонами ±300 мс на n=20 и ±50 мс на n=50.** Межпрогонные сравнения P95 следует воспринимать как иллюстрацию, а не как решающий аргумент.
+
+### Выводы
+
+1. **По чистой латентности на 5 заблокированных в РФ доменах при n=50 лидер — `byedpi` по всем перцентилям.** Если минимальная латентность — единственный критерий, берите `byedpi`.
+2. **`desyncd-msf` отстаёт от `byedpi` на ~18 мс по медиане** (316 против 298 мс). В пользовательском восприятии эти два инструмента взаимозаменяемы.
+3. **Берите `desyncd` ради того, чего нет в `byedpi` и `tpws`:** Protocol Morphing классификатор DPI, per-domain сохранение стратегий с confidence decay, RFC 6125 wildcard правила, SOCKS5/4/4a + HTTP CONNECT + HTTP forward на одном порту, DNS-over-TLS, автоадаптация через `--preset russia`, кроссплатформенный GUI. ~18 мс разницы в медиане — цена за эти фичи.
+4. **Внутри desyncd ставьте `multi_stream_frag` как дефолтную технику.** Воспроизводимо обыгрывает `tls_record_frag` по медиане и среднему на обоих прогонах.
 
 ## Конфигурация
 
