@@ -11,6 +11,7 @@
 //! - Non-TLS: HTTP requests, unknown protocols — pass through or apply HTTP techniques
 
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use desyncd_desync::PayloadContext;
@@ -20,6 +21,8 @@ use desyncd_types::{DesyncAction, StealthConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, trace};
+
+use crate::connstate::ConnState;
 
 /// Maximum buffer size for first-packet reassembly (64KB).
 /// A typical ClientHello is 200-600 bytes; Firefox/Chrome can be ~700 bytes
@@ -41,6 +44,9 @@ pub async fn relay_with_desync(
 ) -> anyhow::Result<()> {
     // Enable TCP_NODELAY on upstream to control segment boundaries.
     upstream.set_nodelay(true)?;
+
+    // Per-connection state, shared between the two relay directions.
+    let state = Arc::new(ConnState::new());
 
     // --- First outbound data: reassemble and apply desync ---
     let first_buf = match reassemble_first_message(&mut client).await {
@@ -76,6 +82,7 @@ pub async fn relay_with_desync(
                 new_len = data.len(),
                 "desync: payload replaced (e.g. tls_record_frag)"
             );
+            state.mark_desync_applied();
         }
         DesyncAction::Split(chunks) => {
             let sizes: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
@@ -85,6 +92,7 @@ pub async fn relay_with_desync(
                 ?sizes,
                 "desync: payload split (e.g. tcp_split)"
             );
+            state.mark_desync_applied();
         }
         DesyncAction::InjectBefore(fakes) => {
             info!(
@@ -92,16 +100,21 @@ pub async fn relay_with_desync(
                 num_fakes = fakes.len(),
                 "desync: injecting fake packets before real data"
             );
+            state.mark_desync_applied();
         }
     }
 
     crate::action::execute_action(&action, &ctx.payload, &mut upstream, stealth).await?;
+    state.add_bytes_sent(ctx.payload.len() as u64);
 
     // --- Bidirectional relay for remaining data ---
     let (mut client_reader, mut client_writer) = client.into_split();
     let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
 
-    let client_to_upstream = async {
+    let state_up = Arc::clone(&state);
+    let state_down = Arc::clone(&state);
+
+    let client_to_upstream = async move {
         let mut buf = vec![0u8; 65536];
         loop {
             let n = match client_reader.read(&mut buf).await {
@@ -111,12 +124,13 @@ pub async fn relay_with_desync(
                 Err(e) => return Err(e),
             };
             upstream_writer.write_all(&buf[..n]).await?;
+            state_up.add_bytes_sent(n as u64);
         }
         upstream_writer.shutdown().await?;
         Ok::<_, io::Error>(())
     };
 
-    let upstream_to_client = async {
+    let upstream_to_client = async move {
         let mut buf = vec![0u8; 65536];
         loop {
             let n = match upstream_reader.read(&mut buf).await {
@@ -125,6 +139,9 @@ pub async fn relay_with_desync(
                 Err(e) if e.kind() == io::ErrorKind::ConnectionReset => break,
                 Err(e) => return Err(e),
             };
+            // First response from upstream — the desync didn't break the handshake.
+            state_down.mark_upstream_responded();
+            state_down.add_bytes_received(n as u64);
             client_writer.write_all(&buf[..n]).await?;
         }
         client_writer.shutdown().await?;
@@ -142,6 +159,16 @@ pub async fn relay_with_desync(
                 trace!(error = %e, "upstream->client relay ended");
             }
         }
+    }
+
+    // Telemetry: if desync was applied but upstream never responded, the
+    // technique likely broke the connection. Useful for diagnosing bad strategies.
+    if !state.is_success() {
+        debug!(
+            ?domain,
+            elapsed_ms = state.elapsed().as_millis() as u64,
+            "desync applied but upstream never responded — strategy may be broken"
+        );
     }
 
     Ok(())

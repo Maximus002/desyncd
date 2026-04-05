@@ -401,10 +401,10 @@ fn classify_from_probes(
     diag: &DiagProbes,
     connection_refused: bool,
 ) -> (DpiProfile, Vec<(String, SplitPosition)>, f64) {
-    let tls_ok = diag.tls_record_frag.as_ref().map_or(false, |r| r.success);
-    let tcp_ok = diag.tcp_split.as_ref().map_or(false, |r| r.success);
-    let sni_ok = diag.sni_manip.as_ref().map_or(false, |r| r.success);
-    let dis_ok = diag.disorder.as_ref().map_or(false, |r| r.success);
+    let tls_ok = diag.tls_record_frag.as_ref().is_some_and(|r| r.success);
+    let tcp_ok = diag.tcp_split.as_ref().is_some_and(|r| r.success);
+    let sni_ok = diag.sni_manip.as_ref().is_some_and(|r| r.success);
+    let dis_ok = diag.disorder.as_ref().is_some_and(|r| r.success);
 
     let successes = [tls_ok, tcp_ok, sni_ok, dis_ok]
         .iter()

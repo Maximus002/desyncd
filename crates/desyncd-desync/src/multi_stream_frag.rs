@@ -203,7 +203,7 @@ fn compute_split_points(
             for i in 1..=extra_splits {
                 let pos = last_point + (remaining_space * i) / (extra_splits + 1);
                 let pos = pos.clamp(last_point + 1, data_len.saturating_sub(1));
-                if points.last().map_or(true, |&last| pos > last) {
+                if points.last().is_none_or(|&last| pos > last) {
                     points.push(pos);
                 }
             }

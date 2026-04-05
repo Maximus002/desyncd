@@ -260,7 +260,7 @@ mod tests {
         for _ in 0..20 {
             let record = build_fake_tls_record(Some(&stealth));
             let len = u16::from_be_bytes([record[3], record[4]]) as usize;
-            assert!(len >= 100 && len <= 200, "size {} out of range", len);
+            assert!((100..=200).contains(&len), "size {} out of range", len);
             assert_eq!(record.len(), 5 + len);
             sizes.insert(len);
         }

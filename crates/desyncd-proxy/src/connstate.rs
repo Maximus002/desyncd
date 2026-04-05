@@ -4,9 +4,11 @@
 //! handles TCP seq/ack/retransmit. Our state tracking focuses on:
 //!
 //! - Whether desync has been applied to this connection
-//! - Which technique was used (for logging/metrics)
-//! - Whether the connection succeeded after desync (for adaptation feedback)
+//! - Whether the connection succeeded after desync (for logging/telemetry)
 //! - Bytes transferred (for detecting stalls that may indicate DPI slowdown)
+//!
+//! Shared via `Arc` between the two relay directions, so all mutators
+//! take `&self` and use atomics.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -16,12 +18,6 @@ use std::time::Instant;
 pub struct ConnState {
     /// Whether we've applied desync techniques to the first outbound data.
     pub desync_applied: AtomicBool,
-    /// Name of the technique that was applied (empty if none).
-    pub technique_name: String,
-    /// Name of the strategy that was applied.
-    pub strategy_name: String,
-    /// Target domain (if known from SOCKS/CONNECT handshake).
-    pub domain: Option<String>,
     /// When the connection was established.
     pub started_at: Instant,
     /// Whether the upstream connection succeeded (got response data).
@@ -32,14 +28,17 @@ pub struct ConnState {
     pub bytes_received: AtomicU64,
 }
 
+impl Default for ConnState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnState {
     /// Create a new connection state.
-    pub fn new(domain: Option<String>) -> Self {
+    pub fn new() -> Self {
         Self {
             desync_applied: AtomicBool::new(false),
-            technique_name: String::new(),
-            strategy_name: String::new(),
-            domain,
             started_at: Instant::now(),
             upstream_responded: AtomicBool::new(false),
             bytes_sent: AtomicU64::new(0),
@@ -48,10 +47,8 @@ impl ConnState {
     }
 
     /// Record that desync was applied.
-    pub fn mark_desync_applied(&mut self, strategy: &str, technique: &str) {
+    pub fn mark_desync_applied(&self) {
         self.desync_applied.store(true, Ordering::Relaxed);
-        self.strategy_name = strategy.to_string();
-        self.technique_name = technique.to_string();
     }
 
     /// Record that we got a response from upstream.
