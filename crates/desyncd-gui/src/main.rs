@@ -272,6 +272,7 @@ async fn test_domain(domain: String) -> Result<Vec<ProbeResultInfo>, String> {
                 sni_mode: None,
                 host_mode: None,
                 stealth: None,
+                l7_filter: None,
             }],
         };
 
@@ -443,6 +444,7 @@ fn generate_config_for_gui(
         proxy: desyncd_config::ProxyConfig {
             listen: base_config.listen,
             socks5: true,
+            auto_retry_fallback: base_config.auto_retry_fallback.clone(),
         },
         adaptation: desyncd_config::AdaptationConfig {
             enabled: true,

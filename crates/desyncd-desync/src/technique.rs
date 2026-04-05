@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::PayloadContext;
-use desyncd_types::{DesyncAction, Result, SplitPosition, StealthConfig};
+use desyncd_types::{DesyncAction, L7Filter, Result, SplitPosition, StealthConfig};
 
 /// Configuration for a single technique within a strategy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +45,13 @@ pub struct TechniqueConfig {
     /// Per-technique stealth overrides.
     #[serde(default)]
     pub stealth: Option<desyncd_types::StealthConfig>,
+
+    /// L7 protocol filter — only apply this technique if the detected
+    /// application-layer protocol matches. `None` means apply to any. Lets
+    /// a single strategy chain different techniques per protocol
+    /// (byedpi's `--filter-l7 tls`/`--filter-l7 http` equivalent).
+    #[serde(default)]
+    pub l7_filter: Option<L7Filter>,
 }
 
 fn default_true() -> bool {

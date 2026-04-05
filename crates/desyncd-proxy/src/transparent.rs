@@ -74,7 +74,7 @@ mod linux {
 
         // Domain is unknown in transparent mode — will be extracted from
         // the first data (TLS SNI or HTTP Host header) by PayloadContext.
-        relay::relay_with_desync(client, upstream, None, selector, stealth).await
+        relay::relay_with_desync(client, upstream, original_dst, None, selector, stealth).await
     }
 
     /// Recover the original destination address using `SO_ORIGINAL_DST`.

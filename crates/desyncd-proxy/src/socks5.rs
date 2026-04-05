@@ -41,12 +41,13 @@ pub async fn handle_client(
         anyhow::bail!("unsupported SOCKS version: {}", version);
     }
 
-    let nmethods = client.read_u8().await?;
-    let mut methods = vec![0u8; nmethods as usize];
-    client.read_exact(&mut methods).await?;
+    let nmethods = client.read_u8().await? as usize;
+    // RFC 1928: NMETHODS is a u8, so max 255 — stack buffer avoids heap alloc.
+    let mut methods = [0u8; 255];
+    client.read_exact(&mut methods[..nmethods]).await?;
 
     // We only support "no authentication".
-    if !methods.contains(&AUTH_NONE) {
+    if !methods[..nmethods].contains(&AUTH_NONE) {
         client.write_all(&[SOCKS_VERSION, 0xFF]).await?;
         anyhow::bail!("no acceptable auth method from client");
     }
@@ -83,20 +84,16 @@ pub async fn handle_client(
                 send_reply(&mut client, REPLY_GENERAL_FAILURE, atyp).await?;
                 anyhow::bail!("SOCKS5 domain length is zero");
             }
-            let mut domain_bytes = vec![0u8; len];
-            client.read_exact(&mut domain_bytes).await?;
+            // RFC 1928: domain length is u8, max 255 — stack buffer avoids heap alloc.
+            let mut domain_buf = [0u8; 255];
+            client.read_exact(&mut domain_buf[..len]).await?;
             let port = client.read_u16().await?;
-            let domain = String::from_utf8(domain_bytes)?;
+            let domain = std::str::from_utf8(&domain_buf[..len])
+                .map_err(|e| anyhow::anyhow!("SOCKS5 domain is not valid UTF-8: {}", e))?
+                .to_string();
 
-            // Resolve domain, preferring IPv4 over IPv6.
-            let addr_str = format!("{}:{}", domain, port);
-            let addrs: Vec<SocketAddr> = lookup_host(&addr_str).await?.collect();
-            let addr = addrs
-                .iter()
-                .find(|a| a.is_ipv4())
-                .or_else(|| addrs.first())
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))?;
+            // Resolve domain, preferring IPv4, without collecting into a Vec.
+            let addr = resolve_preferring_v4(&domain, port).await?;
 
             (addr, Some(domain))
         }
@@ -134,35 +131,55 @@ pub async fn handle_client(
     send_reply(&mut client, REPLY_SUCCESS, atyp).await?;
 
     // --- Phase 4: Relay with desync ---
-    relay::relay_with_desync(client, upstream, domain.as_deref(), selector, stealth).await?;
+    relay::relay_with_desync(client, upstream, target_addr, domain.as_deref(), selector, stealth).await?;
 
     Ok(())
 }
 
 /// Send a SOCKS5 reply to the client.
+///
+/// Allocation-free for the IPv4 case (which covers IPv4, domain, and fallback).
+/// IPv6 replies use a 22-byte stack buffer.
 async fn send_reply(client: &mut TcpStream, reply: u8, atyp: u8) -> anyhow::Result<()> {
-    let mut response = vec![SOCKS_VERSION, reply, 0x00];
+    if atyp == ATYP_IPV6 {
+        // VER REP RSV ATYP BND.ADDR(16) BND.PORT(2) = 22 bytes
+        let response = [
+            SOCKS_VERSION, reply, 0x00, ATYP_IPV6,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // BND.ADDR
+            0, 0, // BND.PORT
+        ];
+        client.write_all(&response).await?;
+    } else {
+        // VER REP RSV ATYP BND.ADDR(4) BND.PORT(2) = 10 bytes
+        let response = [
+            SOCKS_VERSION, reply, 0x00, ATYP_IPV4,
+            0, 0, 0, 0, // BND.ADDR
+            0, 0, // BND.PORT
+        ];
+        client.write_all(&response).await?;
+    }
+    Ok(())
+}
 
-    match atyp {
-        ATYP_IPV4 | ATYP_DOMAIN => {
-            response.push(ATYP_IPV4);
-            response.extend_from_slice(&[0, 0, 0, 0]); // BND.ADDR
-            response.extend_from_slice(&[0, 0]); // BND.PORT
+/// Resolve a domain to a SocketAddr, preferring IPv4, without collecting into a Vec.
+///
+/// This is a hot-path helper: on every SOCKS5/4a connection with a domain target
+/// we need to look up the address. The previous implementation called
+/// `format!("{}:{}", domain, port)` to build a &str, then `.collect::<Vec>()`ed the
+/// iterator, then searched it twice (once for v4, once for any). We now use the
+/// tuple form of `lookup_host` (no format!) and short-circuit on the first v4.
+async fn resolve_preferring_v4(domain: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let mut first: Option<SocketAddr> = None;
+    let iter = lookup_host((domain, port)).await?;
+    for a in iter {
+        if a.is_ipv4() {
+            return Ok(a);
         }
-        ATYP_IPV6 => {
-            response.push(ATYP_IPV6);
-            response.extend_from_slice(&[0u8; 16]); // BND.ADDR
-            response.extend_from_slice(&[0, 0]); // BND.PORT
-        }
-        _ => {
-            response.push(ATYP_IPV4);
-            response.extend_from_slice(&[0, 0, 0, 0]);
-            response.extend_from_slice(&[0, 0]);
+        if first.is_none() {
+            first = Some(a);
         }
     }
-
-    client.write_all(&response).await?;
-    Ok(())
+    first.ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))
 }
 
 /// Handle a SOCKS4/4a client connection.
@@ -199,44 +216,43 @@ pub async fn handle_socks4(
     let mut ip_bytes = [0u8; 4];
     client.read_exact(&mut ip_bytes).await?;
 
-    // Read userid (null-terminated).
-    let mut userid = Vec::new();
+    // Read userid (null-terminated). Max 256 bytes; we discard the content.
+    let mut userid_buf = [0u8; 256];
+    let mut userid_len = 0usize;
     loop {
         let b = client.read_u8().await?;
         if b == 0x00 {
             break;
         }
-        userid.push(b);
-        if userid.len() > 255 {
+        if userid_len >= userid_buf.len() {
             anyhow::bail!("SOCKS4 userid too long");
         }
+        userid_buf[userid_len] = b;
+        userid_len += 1;
     }
 
     // SOCKS4a: if IP is 0.0.0.x (x != 0), read domain after userid.
     let is_socks4a = ip_bytes[0] == 0 && ip_bytes[1] == 0 && ip_bytes[2] == 0 && ip_bytes[3] != 0;
 
     let (target_addr, domain) = if is_socks4a {
-        // Read domain name (null-terminated).
-        let mut domain_bytes = Vec::new();
+        // Read domain name (null-terminated) into a stack buffer.
+        let mut domain_buf = [0u8; 256];
+        let mut domain_len = 0usize;
         loop {
             let b = client.read_u8().await?;
             if b == 0x00 {
                 break;
             }
-            domain_bytes.push(b);
-            if domain_bytes.len() > 255 {
+            if domain_len >= domain_buf.len() {
                 anyhow::bail!("SOCKS4a domain too long");
             }
+            domain_buf[domain_len] = b;
+            domain_len += 1;
         }
-        let domain = String::from_utf8(domain_bytes)?;
-        let addr_str = format!("{}:{}", domain, port);
-        let addrs: Vec<SocketAddr> = lookup_host(&addr_str).await?.collect();
-        let addr = addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| addrs.first())
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("DNS resolution failed for {}", domain))?;
+        let domain = std::str::from_utf8(&domain_buf[..domain_len])
+            .map_err(|e| anyhow::anyhow!("SOCKS4a domain is not valid UTF-8: {}", e))?
+            .to_string();
+        let addr = resolve_preferring_v4(&domain, port).await?;
         (addr, Some(domain))
     } else {
         let ip = Ipv4Addr::from(ip_bytes);
@@ -270,6 +286,6 @@ pub async fn handle_socks4(
     client.write_all(&reply).await?;
 
     // Relay with desync.
-    relay::relay_with_desync(client, upstream, domain.as_deref(), selector, stealth).await?;
+    relay::relay_with_desync(client, upstream, target_addr, domain.as_deref(), selector, stealth).await?;
     Ok(())
 }

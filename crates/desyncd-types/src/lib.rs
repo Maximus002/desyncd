@@ -80,8 +80,63 @@ pub enum SplitPosition {
     SniOffset(i32),
     /// Random offset within the given range.
     Random { min: usize, max: usize },
+    /// Split at the start of the SNI extension header (the `extension_type`
+    /// field, 9 bytes before the SNI value). Equivalent to byedpi/zapret's
+    /// `sniext+0` marker.
+    SniExtStart,
+    /// Split at the end of the second-level domain in the SNI value. For
+    /// `www.twitter.com` this is the byte between `twitter` and `.com`.
+    /// Equivalent to byedpi/zapret's `endsld+0` marker.
+    EndSld,
+    /// Split in the middle of the second-level domain in the SNI value.
+    /// For `www.twitter.com` this falls inside `twitter`. Equivalent to
+    /// byedpi/zapret's `midsld+0` marker. Useful for defeating DPI that
+    /// pattern-matches on the SLD string.
+    MidSld,
+    /// Same as the named marker variants but with an additional signed
+    /// byte offset ("tamper-start"). Lets operators nudge the split by a
+    /// few bytes without re-building the enum externally.
+    ///
+    /// `OffsetFrom { marker: EndSld, delta: -2 }` picks a position two
+    /// bytes before the end of the SLD.
+    OffsetFrom {
+        marker: Box<SplitPosition>,
+        delta: i32,
+    },
 }
 
+
+/// L7 (application-layer) filter for a single technique. When set, the
+/// technique is only applied if the detected protocol matches.
+///
+/// Inspired by byedpi's `--filter-l7 {tls,http,any}`. Lets operators build
+/// chains that apply different techniques to different protocols in one
+/// strategy, e.g. `tls_record_frag` for HTTPS but `http_host` for plain HTTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum L7Filter {
+    /// Only apply if the payload is a TLS ClientHello.
+    Tls,
+    /// Only apply if the payload is an HTTP/1.x request.
+    Http,
+    /// Only apply if the payload is a QUIC Initial packet.
+    Quic,
+    /// Apply regardless of detected protocol.
+    Any,
+}
+
+impl L7Filter {
+    /// Check whether this filter matches the detected protocol.
+    pub fn matches(&self, proto: &AppProtocol) -> bool {
+        matches!(
+            (self, proto),
+            (L7Filter::Any, _)
+                | (L7Filter::Tls, AppProtocol::TlsClientHello { .. })
+                | (L7Filter::Http, AppProtocol::HttpRequest { .. })
+                | (L7Filter::Quic, AppProtocol::QuicInitial { .. })
+        )
+    }
+}
 
 /// Stealth configuration for anti-detection and anti-ML features.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

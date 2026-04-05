@@ -2,14 +2,24 @@
 //!
 //! Unlike TCP split which operates at the transport layer, this technique
 //! fragments the TLS handshake at the TLS record layer. The original
-//! ClientHello is wrapped in multiple TLS records, each containing a
-//! portion of the handshake message.
+//! ClientHello is wrapped in two TLS records, each containing a portion of
+//! the handshake message.
 //!
 //! This is fully specification-compliant: RFC 5246 Section 6.2.1 explicitly
 //! allows handshake messages to be fragmented across multiple records.
 //! The server reassembles them transparently.
 //!
 //! DPI systems that only inspect the first TLS record will miss the full SNI.
+//!
+//! ## Latency profile
+//!
+//! The implementation itself is tight: one allocation, one `write_all`. Any
+//! latency variance observed in the wild (P95 spikes vs `multi_stream_frag`)
+//! comes from network-path effects — some CDN frontends re-segment or delay
+//! 2-record ClientHellos, while 3+ records are handled with the common
+//! handshake-reassembly code path. For latency-sensitive flows prefer
+//! `multi_stream_frag`; reserve `tls_record_frag` for cases where an extra
+//! fragment would push the handshake over an MTU boundary.
 //!
 //! Reference: https://upb-syssec.github.io/blog/2023/record-fragmentation/
 

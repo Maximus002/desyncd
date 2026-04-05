@@ -168,6 +168,12 @@ pub struct ProxyConfig {
 
     #[serde(default = "default_true")]
     pub socks5: bool,
+
+    /// Auto-retry fallback chain. When non-empty, desyncd detects early RST
+    /// from upstream after applying the primary strategy and reconnects to
+    /// retry each listed technique in order. Inspired by byedpi's --auto=torst.
+    #[serde(default)]
+    pub auto_retry_fallback: Vec<desyncd_desync::technique::TechniqueConfig>,
 }
 
 impl Default for ProxyConfig {
@@ -175,6 +181,7 @@ impl Default for ProxyConfig {
         Self {
             listen: default_listen(),
             socks5: true,
+            auto_retry_fallback: Vec::new(),
         }
     }
 }
@@ -210,6 +217,8 @@ pub struct AppConfig {
     pub db_path: String,
     pub adaptation: AdaptationConfig,
     pub stealth: StealthConfig,
+    /// Auto-retry fallback chain (empty = disabled).
+    pub auto_retry_fallback: Vec<desyncd_desync::technique::TechniqueConfig>,
 }
 
 impl AppConfig {
@@ -276,6 +285,7 @@ impl AppConfig {
                     sni_mode: None,
                     host_mode: None,
                     stealth: None,
+                    l7_filter: None,
                 }],
             }]
         } else {
@@ -295,6 +305,7 @@ impl AppConfig {
             db_path: config_file.adaptation.db_path.clone(),
             adaptation: config_file.adaptation,
             stealth: config_file.stealth,
+            auto_retry_fallback: config_file.proxy.auto_retry_fallback,
         })
     }
 

@@ -44,6 +44,7 @@ pub fn apply_chain(
             sni_mode: None,
             host_mode: None,
             stealth: None,
+            l7_filter: None,
         };
 
         let action = match crate::apply_technique(name, &inner_ctx, split_pos, None, &config) {

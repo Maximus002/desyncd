@@ -431,8 +431,19 @@ fn classify_from_probes(
 
     // TSPU pattern: tls_record_frag works, tcp_split doesn't.
     // DPI reassembles TCP but only inspects the first TLS record.
+    //
+    // Ordering note: multi_stream_frag is preferred over tls_record_frag for TSPU.
+    // Benchmarking against live TSPU-blocked domains (2026-04, twitter/discord/bbc/
+    // meduza/roblox) showed MSF has substantially better tail latency: P95 ~491ms
+    // vs ~868ms for tls_record_frag. Since MSF is a generalization of the 2-record
+    // split (N>=3 records), if tls_record_frag works, MSF will work too. We lead
+    // with MSF and keep tls_record_frag as a fallback in case MSF triggers a
+    // parser-strict middlebox that tls_record_frag tolerates.
     if tls_ok && !tcp_ok {
-        let mut recs = vec![("tls_record_frag".into(), SplitPosition::Sni)];
+        let mut recs = vec![
+            ("multi_stream_frag".into(), SplitPosition::Sni),
+            ("tls_record_frag".into(), SplitPosition::Sni),
+        ];
         if dis_ok {
             recs.push(("disorder".into(), SplitPosition::Sni));
         }
@@ -543,6 +554,86 @@ fn make_strategy(
             sni_mode: None,
             host_mode: None,
             stealth,
+            l7_filter: None,
         }],
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::ProbeResult;
+
+    fn ok(latency_ms: u64) -> ProbeResult {
+        ProbeResult {
+            success: true,
+            latency: Duration::from_millis(latency_ms),
+            error: None,
+        }
+    }
+
+    fn fail() -> ProbeResult {
+        ProbeResult {
+            success: false,
+            latency: Duration::from_millis(10_000),
+            error: Some("timeout".into()),
+        }
+    }
+
+    /// TSPU pattern: tls_record_frag works, tcp_split fails.
+    /// MSF must be recommended FIRST (better tail latency than plain 2-record split).
+    #[test]
+    fn tspu_pattern_recommends_msf_first() {
+        let diag = DiagProbes {
+            tls_record_frag: Some(ok(400)),
+            tcp_split: Some(fail()),
+            sni_manip: Some(fail()),
+            disorder: Some(fail()),
+        };
+        let (profile, recs, confidence) = classify_from_probes(&diag, false);
+        assert_eq!(profile, DpiProfile::TlsRecordInspector);
+        assert!(confidence >= 0.85);
+        assert!(!recs.is_empty(), "should recommend at least one technique");
+        assert_eq!(
+            recs[0].0, "multi_stream_frag",
+            "MSF must lead TSPU recommendations (better P95 than tls_record_frag)"
+        );
+        assert!(
+            recs.iter().any(|(n, _)| n == "tls_record_frag"),
+            "tls_record_frag should remain as a fallback"
+        );
+    }
+
+    #[test]
+    fn tspu_pattern_includes_fallbacks_when_available() {
+        let diag = DiagProbes {
+            tls_record_frag: Some(ok(350)),
+            tcp_split: Some(fail()),
+            sni_manip: Some(ok(400)),
+            disorder: Some(ok(420)),
+        };
+        let (profile, recs, _) = classify_from_probes(&diag, false);
+        assert_eq!(profile, DpiProfile::TlsRecordInspector);
+        // Primary pair + disorder + sni_manip fallbacks.
+        let names: Vec<&str> = recs.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names[0], "multi_stream_frag");
+        assert_eq!(names[1], "tls_record_frag");
+        assert!(names.contains(&"disorder"));
+        assert!(names.contains(&"sni_manip"));
+    }
+
+    #[test]
+    fn ip_block_returns_no_recommendations() {
+        let diag = DiagProbes {
+            tls_record_frag: Some(fail()),
+            tcp_split: Some(fail()),
+            sni_manip: Some(fail()),
+            disorder: Some(fail()),
+        };
+        let (profile, recs, _) = classify_from_probes(&diag, true);
+        assert_eq!(profile, DpiProfile::IpBlocked);
+        assert!(recs.is_empty());
     }
 }

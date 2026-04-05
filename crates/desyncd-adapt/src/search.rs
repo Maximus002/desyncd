@@ -186,6 +186,7 @@ pub async fn find_best_strategy(
                 sni_mode: None,
                 host_mode: None,
                 stealth: None,
+                l7_filter: None,
             }],
         };
 
@@ -243,6 +244,7 @@ pub async fn find_best_strategy(
                     sni_mode: None,
                     host_mode: None,
                     stealth: None,
+                    l7_filter: None,
                 }],
             };
 
@@ -279,6 +281,7 @@ pub async fn find_best_strategy(
                 sni_mode: None,
                 host_mode: None,
                 stealth: None,
+                l7_filter: None,
             }],
         });
     }
@@ -317,6 +320,7 @@ pub async fn find_best_strategy(
                     sni_mode: None,
                     host_mode: None,
                     stealth: stealth_config.clone(),
+                    l7_filter: None,
                 }],
             };
 

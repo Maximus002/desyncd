@@ -119,6 +119,7 @@ async fn run(config: AppConfig) -> anyhow::Result<()> {
                     sni_mode: None,
                     host_mode: None,
                     stealth: None,
+                    l7_filter: None,
                 },
             ],
         };
@@ -132,11 +133,10 @@ async fn run(config: AppConfig) -> anyhow::Result<()> {
         (config.strategies.clone(), config.rules.clone())
     };
 
-    let selector = Arc::new(Selector::new(
-        strategies,
-        rules,
-        config.default_strategy.clone(),
-    ));
+    let selector = Arc::new(
+        Selector::new(strategies, rules, config.default_strategy.clone())
+            .with_auto_retry_fallback(config.auto_retry_fallback.clone()),
+    );
 
     match config.mode {
         Mode::Socks => {
@@ -247,6 +247,7 @@ async fn test_domains(
                         sni_mode: None,
                         host_mode: None,
                         stealth: None,
+                        l7_filter: None,
                     }],
                 };
 
@@ -508,6 +509,7 @@ fn generate_config(
         proxy: desyncd_config::ProxyConfig {
             listen: base_config.listen,
             socks5: true,
+            auto_retry_fallback: base_config.auto_retry_fallback.clone(),
         },
         adaptation: desyncd_config::AdaptationConfig {
             enabled: true,

@@ -544,6 +544,7 @@ mod tests {
             sni_mode: None,
             host_mode: None,
             stealth: None,
+            l7_filter: None,
         }];
 
         let id = store.save_strategy("test_strategy", &techniques).unwrap();
@@ -580,6 +581,7 @@ mod tests {
             sni_mode: None,
             host_mode: None,
             stealth: None,
+            l7_filter: None,
         }];
         let sid = store.save_strategy("best", &techniques).unwrap();
 
@@ -615,6 +617,7 @@ mod tests {
             sni_mode: None,
             host_mode: None,
             stealth: None,
+            l7_filter: None,
         }];
         let sid = store.save_strategy("s1", &techniques).unwrap();
         store.update_domain_strategy("example.com", sid, 95.0).unwrap();
@@ -639,6 +642,7 @@ mod tests {
             sni_mode: None,
             host_mode: None,
             stealth: None,
+            l7_filter: None,
         }];
         let sid = store.save_strategy("s1", &techniques).unwrap();
         store.update_domain_strategy("example.com", sid, 95.0).unwrap();

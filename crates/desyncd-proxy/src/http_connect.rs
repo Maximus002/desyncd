@@ -133,7 +133,7 @@ async fn handle_connect_tunnel(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
 
-    relay::relay_with_desync(client, upstream, Some(&host), selector, stealth).await?;
+    relay::relay_with_desync(client, upstream, resolved, Some(&host), selector, stealth).await?;
     Ok(())
 }
 
